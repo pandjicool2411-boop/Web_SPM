@@ -27,3 +27,7 @@ desktop.ini
 
 # PHP temporary files
 *.cache
+
+# Local database configuration
+config/database.php
+config/database.local.php
