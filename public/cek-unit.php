@@ -494,12 +494,23 @@ foreach ($units as $unit) {
         </div>
 
 
-        <a
-            href="dashboard.php"
-            class="back"
-        >
-            ← Dashboard
-        </a>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+
+            <a
+                href="scan-cek.php"
+                class="btn btn-scan"
+            >
+                📷 Scan Cek Unit
+            </a>
+
+            <a
+                href="dashboard.php"
+                class="back"
+            >
+                ← Dashboard
+            </a>
+
+        </div>
 
     </div>
 
