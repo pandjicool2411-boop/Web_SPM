@@ -1,9 +1,74 @@
 <?php
 
-require_once "../config/auth.php";
-require_once "../config/database.php";
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../config/auth.php';
+
+require_login();
+
+$kodeUnit = trim($_GET['kode_unit'] ?? '');
+
+$unit = null;
+$error = '';
+
+/*
+|--------------------------------------------------------------------------
+| Jika ada kode unit dari QR / input
+|--------------------------------------------------------------------------
+*/
+
+if ($kodeUnit !== '') {
+
+    try {
+
+        $stmt = $pdo->prepare("
+            SELECT
+                u.id,
+                u.kode_unit,
+                u.nama_unit,
+                u.kategori,
+                u.jumlah,
+                u.status,
+                u.owner_branch_id,
+                u.created_at,
+                u.updated_at,
+
+                b.nama_cabang
+
+            FROM units u
+
+            INNER JOIN branches b
+                ON b.id = u.owner_branch_id
+
+            WHERE u.kode_unit = ?
+
+            LIMIT 1
+        ");
+
+        $stmt->execute([
+            $kodeUnit
+        ]);
+
+        $unit = $stmt->fetch();
+
+
+        if (!$unit) {
+
+            $error =
+                'Unit dengan kode "' .
+                $kodeUnit .
+                '" tidak ditemukan.';
+
+        }
+
+    } catch (PDOException $e) {
+
+        $error =
+            'Terjadi kesalahan saat mengambil data unit.';
+    }
+}
 
 ?>
+
 <!DOCTYPE html>
 <html lang="id">
 
@@ -16,10 +81,13 @@ require_once "../config/database.php";
         content="width=device-width, initial-scale=1.0"
     >
 
-    <title>Scan Unit Cek - Sistem Scan Unit</title>
+    <title>Scan Cek Unit - Sistem Scan Unit</title>
 
-    <!-- Library QR Scanner -->
-    <script src="https://unpkg.com/html5-qrcode"></script>
+    <script
+        src="https://unpkg.com/html5-qrcode"
+        type="text/javascript"
+    ></script>
+
 
     <style>
 
@@ -29,136 +97,170 @@ require_once "../config/database.php";
 
         body {
             margin: 0;
-            font-family:
-                Arial,
-                Helvetica,
-                sans-serif;
-            background: #f5f7fb;
-            color: #111827;
+            font-family: Arial, Helvetica, sans-serif;
+            background: #f4f6f8;
+            color: #1f2937;
         }
 
         .container {
-            width: 92%;
-            max-width: 760px;
-            margin: 0 auto;
-            padding: 30px 0 50px;
+            width: min(850px, 94%);
+            margin: 30px auto;
         }
 
-        /* =========================
-           HEADER
-        ========================= */
+
+        /*
+        |--------------------------------------------------------------------------
+        | Header
+        |--------------------------------------------------------------------------
+        */
+
+        .topbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+            margin-bottom: 22px;
+        }
+
+        .title h1 {
+            margin: 0;
+            font-size: 25px;
+        }
+
+        .title p {
+            margin: 6px 0 0;
+            color: #6b7280;
+            font-size: 14px;
+        }
 
         .back {
-            display: inline-flex;
-            align-items: center;
-            gap: 7px;
-
-            margin-bottom: 25px;
-
-            color: #2563eb;
             text-decoration: none;
-
+            background: #e5e7eb;
+            color: #111827;
+            padding: 10px 15px;
+            border-radius: 8px;
             font-size: 14px;
-            font-weight: 600;
         }
 
         .back:hover {
-            text-decoration: underline;
+            background: #d1d5db;
         }
 
-        .header {
-            margin-bottom: 20px;
-        }
 
-        .header h1 {
-            margin: 0 0 7px;
-
-            font-size: 30px;
-            letter-spacing: -0.5px;
-        }
-
-        .header p {
-            margin: 0;
-
-            color: #6b7280;
-            font-size: 15px;
-            line-height: 1.6;
-        }
-
-        /* =========================
-           MAIN CARD
-        ========================= */
+        /*
+        |--------------------------------------------------------------------------
+        | Card
+        |--------------------------------------------------------------------------
+        */
 
         .card {
             background: #ffffff;
-
-            border: 1px solid #e5e7eb;
-            border-radius: 18px;
-
-            padding: 25px;
-
-            box-shadow:
-                0 6px 20px rgba(15, 23, 42, 0.05);
+            border-radius: 14px;
+            padding: 22px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.05);
         }
 
-        /* =========================
-           SCANNER HEADER
-        ========================= */
+        .card h2 {
+            margin-top: 0;
+            font-size: 19px;
+        }
 
-        .scanner-title {
+
+        /*
+        |--------------------------------------------------------------------------
+        | Manual Search
+        |--------------------------------------------------------------------------
+        */
+
+        .search-form {
             display: flex;
-            align-items: center;
-            justify-content: space-between;
-
-            gap: 15px;
-
-            margin-bottom: 15px;
+            gap: 10px;
         }
 
-        .scanner-title h2 {
-            margin: 0;
-
-            font-size: 18px;
+        .search-input {
+            flex: 1;
+            min-width: 0;
+            padding: 12px 14px;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            font-size: 15px;
+            outline: none;
         }
 
-        .camera-status {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-
-            padding: 6px 10px;
-
-            border-radius: 999px;
-
-            background: #eff6ff;
-            color: #1d4ed8;
-
-            font-size: 12px;
-            font-weight: 700;
+        .search-input:focus {
+            border-color: #2563eb;
         }
 
-        .camera-dot {
-            width: 7px;
-            height: 7px;
 
-            border-radius: 50%;
+        /*
+        |--------------------------------------------------------------------------
+        | Buttons
+        |--------------------------------------------------------------------------
+        */
 
+        .button-row {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 15px;
+        }
+
+        .btn {
+            border: none;
+            cursor: pointer;
+            text-decoration: none;
+            padding: 11px 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            display: inline-block;
+        }
+
+        .btn-primary {
             background: #2563eb;
+            color: white;
         }
 
-        /* =========================
-           SCANNER
-        ========================= */
+        .btn-primary:hover {
+            background: #1d4ed8;
+        }
 
-        .scanner-wrapper {
-            background: #f8fafc;
+        .btn-secondary {
+            background: #e5e7eb;
+            color: #111827;
+        }
 
-            border: 1px solid #e5e7eb;
-            border-radius: 15px;
+        .btn-secondary:hover {
+            background: #d1d5db;
+        }
 
-            padding: 12px;
+        .btn-green {
+            background: #16a34a;
+            color: white;
+        }
 
-            overflow: hidden;
+        .btn-green:hover {
+            background: #15803d;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Scanner
+        |--------------------------------------------------------------------------
+        */
+
+        .scanner-box {
+            display: none;
+            margin-top: 20px;
+        }
+
+        .scanner-info {
+            text-align: center;
+            color: #6b7280;
+            font-size: 14px;
+            margin-bottom: 14px;
         }
 
         #reader {
@@ -167,249 +269,149 @@ require_once "../config/database.php";
             margin: 0 auto;
         }
 
+
         /*
-         * Sedikit merapikan elemen bawaan
-         * dari html5-qrcode.
-         */
+        |--------------------------------------------------------------------------
+        | Error
+        |--------------------------------------------------------------------------
+        */
 
-        #reader video {
-            width: 100% !important;
-            border-radius: 10px;
-        }
-
-        #reader img {
-            max-width: 100%;
-        }
-
-        #reader__dashboard {
-            padding-top: 10px !important;
-        }
-
-        #reader__dashboard button {
-            border: none !important;
-            border-radius: 8px !important;
-
-            padding: 9px 14px !important;
-
-            background: #2563eb !important;
-            color: #ffffff !important;
-
-            cursor: pointer;
-            font-weight: 600;
-        }
-
-        #reader__dashboard button:hover {
-            background: #1d4ed8 !important;
-        }
-
-        #reader__status_span {
-            font-size: 13px !important;
-        }
-
-        /* =========================
-           SCANNER HINT
-        ========================= */
-
-        .scanner-hint {
-            margin-top: 13px;
-
-            text-align: center;
-
-            color: #6b7280;
-            font-size: 13px;
-            line-height: 1.5;
-        }
-
-        /* =========================
-           ERROR
-        ========================= */
-
-        .error {
-            display: none;
-
-            margin-top: 18px;
-
-            padding: 14px 16px;
-
-            background: #fef2f2;
-            border: 1px solid #fecaca;
-
-            color: #991b1b;
-
-            border-radius: 11px;
-
+        .alert {
+            padding: 13px 15px;
+            border-radius: 9px;
+            margin-bottom: 20px;
             font-size: 14px;
-            line-height: 1.5;
         }
 
-        /* =========================
-           RESULT
-        ========================= */
-
-        .result {
-            display: none;
-
-            margin-top: 25px;
-
-            border: 1px solid #e5e7eb;
-            border-radius: 15px;
-
-            overflow: hidden;
-
-            background: #ffffff;
-        }
-
-        .result-header {
-            padding: 18px 20px;
-
-            background: #f8fafc;
-
-            border-bottom: 1px solid #e5e7eb;
-        }
-
-        .result-header h2 {
-            margin: 0 0 5px;
-
-            font-size: 18px;
-        }
-
-        .result-header p {
-            margin: 0;
-
-            color: #6b7280;
-
-            font-size: 13px;
-        }
-
-        .result-body {
-            padding: 5px 20px 20px;
-        }
-
-        .row {
-            padding: 14px 0;
-
-            border-bottom: 1px solid #e5e7eb;
-        }
-
-        .row:last-child {
-            border-bottom: none;
-        }
-
-        .label {
-            margin-bottom: 5px;
-
-            color: #6b7280;
-
-            font-size: 12px;
-            font-weight: 600;
-
-            text-transform: uppercase;
-            letter-spacing: 0.3px;
-        }
-
-        .value {
-            color: #111827;
-
-            font-size: 15px;
-            font-weight: 600;
-
-            line-height: 1.4;
-        }
-
-        /* =========================
-           STATUS
-        ========================= */
-
-        .status {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-
-            padding: 7px 12px;
-
-            border-radius: 999px;
-
-            font-size: 12px;
-            font-weight: 700;
-        }
-
-        .status.tersedia {
-            background: #dcfce7;
-            color: #166534;
-        }
-
-        .status.disewakan {
+        .alert-error {
             background: #fee2e2;
             color: #991b1b;
         }
 
-        /* =========================
-           SCAN AGAIN
-        ========================= */
 
-        .scan-again {
-            width: 100%;
+        /*
+        |--------------------------------------------------------------------------
+        | Unit Detail
+        |--------------------------------------------------------------------------
+        */
 
-            margin-top: 8px;
+        .unit-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 15px;
+            margin-bottom: 22px;
+        }
 
-            padding: 12px 16px;
+        .unit-code {
+            font-size: 26px;
+            font-weight: bold;
+            margin-bottom: 6px;
+        }
 
-            border: none;
-            border-radius: 10px;
+        .unit-name {
+            color: #4b5563;
+            font-size: 15px;
+        }
 
-            background: #2563eb;
-            color: #ffffff;
+        .status {
+            display: inline-block;
+            padding: 7px 11px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: bold;
+            white-space: nowrap;
+        }
 
+        .status-tersedia {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .status-disewa {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Detail Grid
+        |--------------------------------------------------------------------------
+        */
+
+        .detail-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+        }
+
+        .detail-item {
+            background: #f8fafc;
+            border-radius: 9px;
+            padding: 14px;
+        }
+
+        .detail-label {
+            color: #6b7280;
+            font-size: 12px;
+            margin-bottom: 5px;
+        }
+
+        .detail-value {
             font-size: 14px;
-            font-weight: 600;
-
-            cursor: pointer;
-
-            transition:
-                background 0.2s ease,
-                transform 0.1s ease;
+            font-weight: bold;
         }
 
-        .scan-again:hover {
-            background: #1d4ed8;
+
+        /*
+        |--------------------------------------------------------------------------
+        | Empty
+        |--------------------------------------------------------------------------
+        */
+
+        .empty {
+            text-align: center;
+            padding: 35px 15px;
+            color: #6b7280;
         }
 
-        .scan-again:active {
-            transform: scale(0.98);
+        .empty-icon {
+            font-size: 40px;
+            margin-bottom: 10px;
         }
 
-        /* =========================
-           MOBILE
-        ========================= */
 
-        @media (max-width: 600px) {
+        /*
+        |--------------------------------------------------------------------------
+        | Responsive
+        |--------------------------------------------------------------------------
+        */
+
+        @media (max-width: 650px) {
 
             .container {
-                width: 94%;
-                padding-top: 22px;
+                margin: 20px auto;
             }
 
-            .header h1 {
-                font-size: 26px;
+            .title h1 {
+                font-size: 22px;
             }
 
-            .card {
-                padding: 18px;
-                border-radius: 15px;
-            }
-
-            .scanner-title {
-                align-items: flex-start;
+            .search-form {
                 flex-direction: column;
             }
 
-            .scanner-wrapper {
-                padding: 8px;
+            .unit-header {
+                flex-direction: column;
             }
 
-            .result-body {
-                padding-left: 17px;
-                padding-right: 17px;
+            .detail-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .card {
+                padding: 17px;
             }
 
         }
@@ -418,150 +420,130 @@ require_once "../config/database.php";
 
 </head>
 
+
 <body>
 
 <div class="container">
 
-    <a
-        href="dashboard.php"
-        class="back"
-    >
-        ← Kembali ke Dashboard
-    </a>
 
-    <div class="header">
+    <!-- HEADER -->
 
-        <h1>Scan Unit Cek</h1>
+    <div class="topbar">
 
-        <p>
-            Gunakan kamera untuk melihat informasi
-            dan status unit berdasarkan QR Code.
-        </p>
+        <div class="title">
+
+            <h1>
+                📷 Scan Cek Unit
+            </h1>
+
+            <p>
+                Scan QR untuk melihat informasi unit.
+            </p>
+
+        </div>
+
+
+        <a
+            href="dashboard.php"
+            class="back"
+        >
+            ← Dashboard
+        </a>
 
     </div>
 
+
+    <!-- PENCARIAN -->
+
     <div class="card">
 
-        <div class="scanner-title">
+        <h2>
+            Cari Unit
+        </h2>
 
-            <h2>Arahkan Kamera ke QR</h2>
+        <form
+            method="GET"
+            action="scan-cek.php"
+        >
 
-            <div class="camera-status">
-                <span class="camera-dot"></span>
-                Kamera Scanner
+            <div class="search-form">
+
+                <input
+                    type="text"
+                    name="kode_unit"
+                    class="search-input"
+                    value="<?= htmlspecialchars($kodeUnit) ?>"
+                    placeholder="Masukkan kode unit, contoh: A1"
+                    autocomplete="off"
+                >
+
+                <button
+                    type="submit"
+                    class="btn btn-primary"
+                >
+                    🔍 Cari
+                </button>
+
             </div>
+
+        </form>
+
+
+        <div class="button-row">
+
+            <button
+                type="button"
+                class="btn btn-green"
+                onclick="toggleScanner()"
+            >
+                📷 Buka Kamera
+            </button>
+
+
+            <?php if ($kodeUnit !== ''): ?>
+
+                <a
+                    href="scan-cek.php"
+                    class="btn btn-secondary"
+                >
+                    Reset
+                </a>
+
+            <?php endif; ?>
 
         </div>
 
-        <div class="scanner-wrapper">
+
+        <!-- SCANNER -->
+
+        <div
+            id="scannerBox"
+            class="scanner-box"
+        >
+
+            <div class="scanner-info">
+
+                Arahkan kamera ke QR unit.
+
+                <br>
+
+                QR unit berisi kode seperti
+                <strong>A1</strong>.
+
+            </div>
+
 
             <div id="reader"></div>
 
-        </div>
 
-        <div class="scanner-hint">
-            Pastikan seluruh QR Code terlihat jelas
-            di dalam area kamera.
-        </div>
-
-        <div
-            id="error"
-            class="error"
-        ></div>
-
-        <div
-            id="result"
-            class="result"
-        >
-
-            <div class="result-header">
-
-                <h2>Informasi Unit</h2>
-
-                <p>
-                    Data berikut berasal dari unit
-                    yang berhasil dipindai.
-                </p>
-
-            </div>
-
-            <div class="result-body">
-
-                <div class="row">
-
-                    <div class="label">
-                        Kode Unit
-                    </div>
-
-                    <div
-                        class="value"
-                        id="kode_unit"
-                    ></div>
-
-                </div>
-
-                <div class="row">
-
-                    <div class="label">
-                        Nama Unit
-                    </div>
-
-                    <div
-                        class="value"
-                        id="nama_unit"
-                    ></div>
-
-                </div>
-
-                <div class="row">
-
-                    <div class="label">
-                        Kategori
-                    </div>
-
-                    <div
-                        class="value"
-                        id="kategori"
-                    ></div>
-
-                </div>
-
-                <div class="row">
-
-                    <div class="label">
-                        Terdaftar di Cabang
-                    </div>
-
-                    <div
-                        class="value"
-                        id="nama_cabang"
-                    ></div>
-
-                </div>
-
-                <div class="row">
-
-                    <div class="label">
-                        Status Unit
-                    </div>
-
-                    <div class="value">
-
-                        <span
-                            id="status"
-                            class="status"
-                        ></span>
-
-                    </div>
-
-                </div>
+            <div class="button-row">
 
                 <button
                     type="button"
-                    class="scan-again"
-                    onclick="scanAgain()"
+                    class="btn btn-secondary"
+                    onclick="stopScanner()"
                 >
-                    Scan Unit Lain
+                    Tutup Kamera
                 </button>
 
             </div>
@@ -570,37 +552,287 @@ require_once "../config/database.php";
 
     </div>
 
+
+    <!-- ERROR -->
+
+    <?php if ($error !== ''): ?>
+
+        <div class="alert alert-error">
+
+            <?= htmlspecialchars($error) ?>
+
+        </div>
+
+    <?php endif; ?>
+
+
+    <!-- HASIL UNIT -->
+
+    <?php if ($unit): ?>
+
+        <div class="card">
+
+
+            <div class="unit-header">
+
+                <div>
+
+                    <div class="unit-code">
+
+                        <?= htmlspecialchars(
+                            $unit['kode_unit']
+                        ) ?>
+
+                    </div>
+
+                    <div class="unit-name">
+
+                        <?= htmlspecialchars(
+                            $unit['nama_unit']
+                        ) ?>
+
+                    </div>
+
+                </div>
+
+
+                <?php if (
+                    $unit['status'] === 'TERSEDIA'
+                ): ?>
+
+                    <span class="
+                        status
+                        status-tersedia
+                    ">
+                        TERSEDIA
+                    </span>
+
+                <?php else: ?>
+
+                    <span class="
+                        status
+                        status-disewa
+                    ">
+                        DISEWAKAN
+                    </span>
+
+                <?php endif; ?>
+
+            </div>
+
+
+            <div class="detail-grid">
+
+
+                <div class="detail-item">
+
+                    <div class="detail-label">
+                        Kode Unit
+                    </div>
+
+                    <div class="detail-value">
+                        <?= htmlspecialchars(
+                            $unit['kode_unit']
+                        ) ?>
+                    </div>
+
+                </div>
+
+
+                <div class="detail-item">
+
+                    <div class="detail-label">
+                        Nama Unit
+                    </div>
+
+                    <div class="detail-value">
+                        <?= htmlspecialchars(
+                            $unit['nama_unit']
+                        ) ?>
+                    </div>
+
+                </div>
+
+
+                <div class="detail-item">
+
+                    <div class="detail-label">
+                        Kategori
+                    </div>
+
+                    <div class="detail-value">
+                        <?= htmlspecialchars(
+                            $unit['kategori']
+                        ) ?>
+                    </div>
+
+                </div>
+
+
+                <div class="detail-item">
+
+                    <div class="detail-label">
+                        Jumlah
+                    </div>
+
+                    <div class="detail-value">
+                        <?= (int) $unit['jumlah'] ?>
+                    </div>
+
+                </div>
+
+
+                <div class="detail-item">
+
+                    <div class="detail-label">
+                        Pemilik Unit
+                    </div>
+
+                    <div class="detail-value">
+                        <?= htmlspecialchars(
+                            $unit['nama_cabang']
+                        ) ?>
+                    </div>
+
+                </div>
+
+
+                <div class="detail-item">
+
+                    <div class="detail-label">
+                        Status
+                    </div>
+
+                    <div class="detail-value">
+
+                        <?php if (
+                            $unit['status'] === 'TERSEDIA'
+                        ): ?>
+
+                            <span style="color:#166534;">
+                                Tersedia
+                            </span>
+
+                        <?php else: ?>
+
+                            <span style="color:#92400e;">
+                                Sedang Disewa
+                            </span>
+
+                        <?php endif; ?>
+
+                    </div>
+
+                </div>
+
+
+            </div>
+
+
+            <div class="button-row">
+
+                <a
+                    href="qr.php?id=<?= (int) $unit['id'] ?>"
+                    class="btn btn-primary"
+                >
+                    Lihat QR Unit
+                </a>
+
+
+                <?php if (
+                    $unit['status'] === 'DISEWAKAN'
+                ): ?>
+
+                    <a
+                        href="cek-keluar.php?kode_unit=<?= urlencode($unit['kode_unit']) ?>"
+                        class="btn btn-secondary"
+                    >
+                        Lihat Transaksi
+                    </a>
+
+                <?php endif; ?>
+
+            </div>
+
+
+        </div>
+
+    <?php elseif ($kodeUnit === '' && $error === ''): ?>
+
+        <div class="card">
+
+            <div class="empty">
+
+                <div class="empty-icon">
+                    📦
+                </div>
+
+                <strong>
+                    Belum ada unit yang dicari.
+                </strong>
+
+                <p>
+                    Masukkan kode unit atau scan QR untuk melihat
+                    detail unit.
+                </p>
+
+            </div>
+
+        </div>
+
+    <?php endif; ?>
+
+
 </div>
 
 
 <script>
 
     let scanner = null;
-    let sedangMemproses = false;
+    let scannerRunning = false;
 
 
-    /*
-     * =========================================
-     * MULAI SCANNER
-     * =========================================
-     */
+    function toggleScanner() {
 
-    function mulaiScanner() {
+        const box =
+            document.getElementById('scannerBox');
 
-        if (sedangMemproses) {
+
+        if (box.style.display === 'block') {
+
+            stopScanner();
+
+        } else {
+
+            startScanner();
+
+        }
+
+    }
+
+
+    function startScanner() {
+
+        const box =
+            document.getElementById('scannerBox');
+
+
+        box.style.display = 'block';
+
+
+        if (scannerRunning) {
             return;
         }
 
-        sedangMemproses = false;
 
-        scanner = new Html5Qrcode("reader");
+        scanner =
+            new Html5Qrcode("reader");
+
 
         scanner.start(
-
             {
                 facingMode: "environment"
             },
-
             {
                 fps: 10,
 
@@ -610,58 +842,46 @@ require_once "../config/database.php";
                 }
             },
 
-            function (qrCodeMessage) {
+            function(decodedText) {
 
-                if (sedangMemproses) {
+                const kode =
+                    decodedText.trim();
+
+
+                if (!kode) {
                     return;
                 }
 
-                sedangMemproses = true;
 
-                scanner
-                    .stop()
-                    .then(function () {
+                stopScanner();
 
-                        cekUnit(qrCodeMessage);
 
-                    })
-                    .catch(function (error) {
-
-                        console.error(
-                            "Gagal menghentikan scanner:",
-                            error
-                        );
-
-                        cekUnit(qrCodeMessage);
-
-                    });
+                window.location.href =
+                    "scan-cek.php?kode_unit=" +
+                    encodeURIComponent(kode);
 
             },
 
-            function (errorMessage) {
+            function(errorMessage) {
 
-                /*
-                 * Error scanning biasa sengaja
-                 * tidak ditampilkan karena scanner
-                 * memang terus mencari QR.
-                 */
+                // Tidak perlu menampilkan
+                // error scanner ke pengguna.
 
             }
 
         )
-        .catch(function (error) {
+        .then(function() {
 
-            sedangMemproses = false;
+            scannerRunning = true;
 
-            tampilError(
+        })
+        .catch(function(error) {
+
+            scannerRunning = false;
+
+            alert(
                 "Kamera tidak dapat digunakan. " +
-                "Pastikan izin kamera diberikan " +
-                "pada browser."
-            );
-
-            console.error(
-                "Camera error:",
-                error
+                "Silakan masukkan kode unit secara manual."
             );
 
         });
@@ -669,215 +889,54 @@ require_once "../config/database.php";
     }
 
 
-    /*
-     * =========================================
-     * CEK UNIT
-     * =========================================
-     */
+    function stopScanner() {
 
-    function cekUnit(qrToken) {
-
-        tampilError("");
-
-        fetch(
-            "cek-unit.php?qr_token=" +
-            encodeURIComponent(qrToken),
-            {
-                method: "GET",
-                credentials: "same-origin"
-            }
-        )
-
-        .then(function (response) {
-
-            if (!response.ok) {
-
-                throw new Error(
-                    "HTTP error: " +
-                    response.status
-                );
-
-            }
-
-            return response.json();
-
-        })
-
-        .then(function (data) {
-
-            if (data.success && data.unit) {
-
-                tampilHasil(data.unit);
-
-            } else {
-
-                tampilError(
-                    data.message ||
-                    "Unit tidak ditemukan."
-                );
-
-            }
-
-        })
-
-        .catch(function (error) {
-
-            console.error(
-                "Cek unit error:",
-                error
-            );
-
-            tampilError(
-                "Terjadi kesalahan saat mengambil " +
-                "data unit."
-            );
-
-        });
-
-    }
-
-
-    /*
-     * =========================================
-     * TAMPIL HASIL
-     * =========================================
-     */
-
-    function tampilHasil(unit) {
-
-        document.getElementById(
-            "result"
-        ).style.display = "block";
-
-        document.getElementById(
-            "error"
-        ).style.display = "none";
-
-
-        document.getElementById(
-            "kode_unit"
-        ).textContent =
-            unit.kode_unit || "-";
-
-
-        document.getElementById(
-            "nama_unit"
-        ).textContent =
-            unit.nama_unit || "-";
-
-
-        document.getElementById(
-            "kategori"
-        ).textContent =
-            unit.kategori || "-";
-
-
-        document.getElementById(
-            "nama_cabang"
-        ).textContent =
-            unit.nama_cabang || "-";
-
-
-        const status =
-            document.getElementById("status");
-
-
-        status.textContent =
-            unit.status || "-";
-
-
-        status.className = "status";
-
-
-        if (unit.status === "TERSEDIA") {
-
-            status.classList.add(
-                "tersedia"
-            );
-
-        } else if (
-            unit.status === "DISEWAKAN"
+        if (
+            scanner &&
+            scannerRunning
         ) {
 
-            status.classList.add(
-                "disewakan"
-            );
+            scanner.stop()
+                .then(function() {
+
+                    scanner.clear();
+
+                    scannerRunning = false;
+
+                })
+                .catch(function() {
+
+                    scannerRunning = false;
+
+                });
 
         }
 
-    }
-
-
-    /*
-     * =========================================
-     * TAMPIL ERROR
-     * =========================================
-     */
-
-    function tampilError(message) {
-
-        const error =
-            document.getElementById("error");
-
-
-        if (!message) {
-
-            error.textContent = "";
-            error.style.display = "none";
-
-            return;
-        }
-
-
-        error.textContent = message;
-        error.style.display = "block";
-
-    }
-
-
-    /*
-     * =========================================
-     * SCAN LAGI
-     * =========================================
-     */
-
-    function scanAgain() {
 
         document.getElementById(
-            "result"
-        ).style.display = "none";
-
-
-        tampilError("");
-
-
-        sedangMemproses = false;
-
-
-        const reader =
-            document.getElementById("reader");
-
-
-        /*
-         * Bersihkan elemen scanner lama
-         * sebelum membuat scanner baru.
-         */
-
-        reader.innerHTML = "";
-
-
-        mulaiScanner();
+            'scannerBox'
+        ).style.display = 'none';
 
     }
 
 
-    /*
-     * =========================================
-     * START
-     * =========================================
-     */
+    window.addEventListener(
+        'beforeunload',
+        function() {
 
-    mulaiScanner();
+            if (
+                scanner &&
+                scannerRunning
+            ) {
+
+                scanner
+                    .stop()
+                    .catch(function() {});
+
+            }
+
+        }
+    );
 
 </script>
 

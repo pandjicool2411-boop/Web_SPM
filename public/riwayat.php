@@ -1,50 +1,237 @@
 <?php
 
-require_once "../config/auth.php";
-require_once "../config/database.php";
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../config/auth.php';
+require_once __DIR__ . '/../config/csrf.php';
 
-// ============================================================
-// AMBIL SEMUA RIWAYAT
-// ============================================================
+require_login();
 
-try {
+$branchId = user_branch_id();
 
-    $stmt = $pdo->query(
-        "SELECT
-            unit_history.id,
-            units.kode_unit,
-            units.nama_unit,
-            unit_history.action,
-            unit_history.description,
-            users.nama AS nama_user,
-            branches.nama_cabang,
-            unit_history.created_at
-         FROM unit_history
-         INNER JOIN units
-            ON unit_history.unit_id = units.id
-         INNER JOIN users
-            ON unit_history.performed_by = users.id
-         INNER JOIN branches
-            ON unit_history.branch_id = branches.id
-         ORDER BY unit_history.created_at DESC"
-    );
 
-    $history = $stmt->fetchAll();
+/*
+|--------------------------------------------------------------------------
+| FILTER BULAN DAN TAHUN
+|--------------------------------------------------------------------------
+*/
 
-} catch (PDOException $e) {
+$currentMonth = (int)date('n');
+$currentYear  = (int)date('Y');
 
-    error_log(
-        "riwayat.php database error: " .
-        $e->getMessage()
-    );
+$selectedMonth = isset($_GET['bulan'])
+    ? (int)$_GET['bulan']
+    : $currentMonth;
 
-    $history = [];
+$selectedYear = isset($_GET['tahun'])
+    ? (int)$_GET['tahun']
+    : $currentYear;
+
+
+/*
+|--------------------------------------------------------------------------
+| VALIDASI FILTER
+|--------------------------------------------------------------------------
+*/
+
+if ($selectedMonth < 1 || $selectedMonth > 12) {
+    $selectedMonth = $currentMonth;
 }
+
+if ($selectedYear < 2020 || $selectedYear > ($currentYear + 5)) {
+    $selectedYear = $currentYear;
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| NAMA BULAN
+|--------------------------------------------------------------------------
+*/
+
+$namaBulan = [
+    1  => 'Januari',
+    2  => 'Februari',
+    3  => 'Maret',
+    4  => 'April',
+    5  => 'Mei',
+    6  => 'Juni',
+    7  => 'Juli',
+    8  => 'Agustus',
+    9  => 'September',
+    10 => 'Oktober',
+    11 => 'November',
+    12 => 'Desember'
+];
+
+
+/*
+|--------------------------------------------------------------------------
+| TANGGAL AWAL DAN AKHIR BULAN
+|--------------------------------------------------------------------------
+*/
+
+$startDate = sprintf(
+    '%04d-%02d-01 00:00:00',
+    $selectedYear,
+    $selectedMonth
+);
+
+$endDate = date(
+    'Y-m-d H:i:s',
+    strtotime($startDate . ' +1 month')
+);
+
+
+/*
+|--------------------------------------------------------------------------
+| AMBIL DATA RIWAYAT
+|--------------------------------------------------------------------------
+*/
+
+$stmt = $pdo->prepare("
+    SELECT
+        uh.id,
+        uh.unit_id,
+        uh.performed_by,
+        uh.branch_id,
+        uh.action,
+        uh.description,
+        uh.created_at,
+
+        u.kode_unit,
+        u.nama_unit,
+        u.kategori,
+
+        usr.nama AS performed_by_name,
+
+        b.nama_cabang
+
+    FROM unit_history uh
+
+    INNER JOIN units u
+        ON u.id = uh.unit_id
+
+    LEFT JOIN users usr
+        ON usr.id = uh.performed_by
+
+    INNER JOIN branches b
+        ON b.id = uh.branch_id
+
+    WHERE uh.branch_id = ?
+      AND uh.created_at >= ?
+      AND uh.created_at < ?
+
+    ORDER BY
+        uh.created_at DESC,
+        uh.id DESC
+");
+
+$stmt->execute([
+    $branchId,
+    $startDate,
+    $endDate
+]);
+
+$history = $stmt->fetchAll();
+
+
+/*
+|--------------------------------------------------------------------------
+| JUMLAH AKTIVITAS
+|--------------------------------------------------------------------------
+*/
 
 $totalHistory = count($history);
 
-?>
 
+/*
+|--------------------------------------------------------------------------
+| HITUNG PER ACTION
+|--------------------------------------------------------------------------
+*/
+
+$actionCount = [];
+
+foreach ($history as $item) {
+
+    $action = $item['action'];
+
+    if (!isset($actionCount[$action])) {
+        $actionCount[$action] = 0;
+    }
+
+    $actionCount[$action]++;
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| LABEL ACTION
+|--------------------------------------------------------------------------
+*/
+
+function actionLabel($action)
+{
+    $labels = [
+
+        'KELUAR' => 'Unit Keluar',
+
+        'MASUK' => 'Unit Masuk',
+
+        'EDIT_UNIT' => 'Edit Unit',
+
+        'TAMBAH_UNIT' => 'Tambah Unit',
+
+        'TRANSFER' => 'Transfer Unit',
+
+        'TRANSFER_KELUAR' => 'Transfer Keluar',
+
+        'TRANSFER_MASUK' => 'Transfer Masuk',
+
+        'BATAL_MASUK' => 'Batalkan Unit Masuk'
+
+    ];
+
+    return $labels[$action] ?? $action;
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| CLASS ACTION
+|--------------------------------------------------------------------------
+*/
+
+function actionClass($action)
+{
+    switch ($action) {
+
+        case 'KELUAR':
+            return 'action-keluar';
+
+        case 'MASUK':
+            return 'action-masuk';
+
+        case 'EDIT_UNIT':
+            return 'action-edit';
+
+        case 'TAMBAH_UNIT':
+            return 'action-tambah';
+
+        case 'TRANSFER':
+        case 'TRANSFER_KELUAR':
+        case 'TRANSFER_MASUK':
+            return 'action-transfer';
+
+        case 'BATAL_MASUK':
+            return 'action-batal';
+
+        default:
+            return 'action-default';
+    }
+}
+
+?>
 <!DOCTYPE html>
 <html lang="id">
 
@@ -57,7 +244,8 @@ $totalHistory = count($history);
         content="width=device-width, initial-scale=1.0"
     >
 
-    <title>Riwayat Unit - Sistem Scan Unit</title>
+    <title>Riwayat Unit</title>
+
 
     <style>
 
@@ -65,820 +253,712 @@ $totalHistory = count($history);
             box-sizing: border-box;
         }
 
+
         body {
             margin: 0;
-            font-family:
-                Arial,
-                Helvetica,
-                sans-serif;
-            background: #f5f7fb;
-            color: #111827;
+            padding: 0;
+            font-family: Arial, Helvetica, sans-serif;
+            background: #f4f6f8;
+            color: #1f2937;
         }
+
 
         .container {
-            width: 92%;
-            max-width: 1200px;
-            margin: 32px auto 50px;
+            width: 100%;
+            max-width: 1150px;
+            margin: 0 auto;
+            padding: 25px 20px 50px;
         }
 
-        /* =====================================================
-           BACK
-           ===================================================== */
 
-        .back {
-            display: inline-flex;
-            align-items: center;
-            gap: 7px;
+        /* =========================================================
+           TOPBAR
+        ========================================================= */
 
-            margin-bottom: 22px;
-
-            color: #2563eb;
-            text-decoration: none;
-
-            font-size: 14px;
-            font-weight: 600;
-
-            transition: 0.2s;
-        }
-
-        .back:hover {
-            color: #1d4ed8;
-        }
-
-        /* =====================================================
-           HEADER
-           ===================================================== */
-
-        .page-header {
-            margin-bottom: 22px;
-        }
-
-        .page-title {
-            margin: 0 0 7px;
-
-            font-size: 30px;
-            line-height: 1.2;
-            font-weight: 700;
-
-            letter-spacing: -0.5px;
-        }
-
-        .page-description {
-            margin: 0;
-
-            max-width: 720px;
-
-            color: #6b7280;
-
-            font-size: 15px;
-            line-height: 1.6;
-        }
-
-        /* =====================================================
-           SUMMARY
-           ===================================================== */
-
-        .summary {
+        .topbar {
             display: flex;
-            align-items: center;
             justify-content: space-between;
+            align-items: center;
             gap: 15px;
+            margin-bottom: 25px;
+        }
 
+
+        .topbar h1 {
+            margin: 0;
+            font-size: 28px;
+        }
+
+
+        .back-btn {
+            display: inline-block;
+            text-decoration: none;
+            background: #374151;
+            color: white;
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+
+
+        .back-btn:hover {
+            background: #1f2937;
+        }
+
+
+        /* =========================================================
+           INFO
+        ========================================================= */
+
+        .info-box {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
             margin-bottom: 20px;
-
-            padding: 18px 20px;
-
-            background: #ffffff;
-
-            border: 1px solid #e5e7eb;
-            border-radius: 14px;
-
-            box-shadow:
-                0 3px 12px rgba(15, 23, 42, 0.04);
+            box-shadow: 0 2px 10px rgba(0,0,0,0.06);
         }
 
-        .summary-left {
-            display: flex;
-            align-items: center;
-            gap: 14px;
+
+        .info-box h2 {
+            margin: 0 0 8px;
         }
 
-        .summary-icon {
-            width: 42px;
-            height: 42px;
 
-            display: flex;
-            align-items: center;
-            justify-content: center;
+        .info-box p {
+            margin: 0;
+            color: #6b7280;
+            font-size: 14px;
+        }
 
-            background: #eff6ff;
 
-            border-radius: 11px;
+        /* =========================================================
+           FILTER
+        ========================================================= */
 
-            color: #2563eb;
+        .filter-box {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+        }
 
+
+        .filter-box h2 {
+            margin: 0 0 15px;
             font-size: 20px;
         }
 
-        .summary-title {
-            margin: 0 0 3px;
 
-            color: #6b7280;
+        .filter-form {
+            display: flex;
+            gap: 10px;
+            align-items: end;
+            flex-wrap: wrap;
+        }
 
+
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+
+        .filter-group label {
+            font-size: 13px;
+            font-weight: bold;
+        }
+
+
+        .filter-group select {
+            min-width: 160px;
+            padding: 11px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            background: white;
             font-size: 14px;
         }
 
-        .summary-text {
-            margin: 0;
 
-            font-size: 16px;
-            font-weight: 700;
-        }
-
-        .summary-number {
-            min-width: 42px;
-            height: 42px;
-
-            display: flex;
-            align-items: center;
-            justify-content: center;
-
-            padding: 0 12px;
-
+        .filter-btn {
+            border: none;
             background: #2563eb;
             color: white;
-
-            border-radius: 10px;
-
-            font-size: 18px;
-            font-weight: 700;
+            padding: 11px 18px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
         }
 
-        /* =====================================================
-           MAIN CARD
-           ===================================================== */
 
-        .card {
-            background: #ffffff;
-
-            border: 1px solid #e5e7eb;
-            border-radius: 16px;
-
-            overflow: hidden;
-
-            box-shadow:
-                0 4px 18px rgba(15, 23, 42, 0.05);
+        .filter-btn:hover {
+            background: #1d4ed8;
         }
 
-        .card-header {
-            padding: 20px 22px;
 
-            border-bottom: 1px solid #e5e7eb;
-        }
-
-        .card-header h2 {
-            margin: 0 0 4px;
-
-            font-size: 18px;
-        }
-
-        .card-header p {
-            margin: 0;
-
-            color: #6b7280;
-
-            font-size: 13px;
-        }
-
-        /* =====================================================
-           TABLE
-           ===================================================== */
-
-        .table-wrapper {
-            width: 100%;
-            overflow-x: auto;
-        }
-
-        table {
-            width: 100%;
-
-            min-width: 1000px;
-
-            border-collapse: collapse;
-        }
-
-        th {
-            padding: 13px 16px;
-
-            background: #f8fafc;
-
-            color: #6b7280;
-
-            font-size: 12px;
-            font-weight: 700;
-
-            text-align: left;
-
-            text-transform: uppercase;
-            letter-spacing: 0.3px;
-
-            border-bottom: 1px solid #e5e7eb;
-
-            white-space: nowrap;
-        }
-
-        td {
-            padding: 15px 16px;
-
-            border-bottom: 1px solid #f1f5f9;
-
-            vertical-align: middle;
-
+        .reset-btn {
+            display: inline-block;
+            text-decoration: none;
+            background: #e5e7eb;
+            color: #374151;
+            padding: 11px 18px;
+            border-radius: 8px;
             font-size: 14px;
         }
 
-        tbody tr {
-            transition: background 0.15s ease;
+
+        .reset-btn:hover {
+            background: #d1d5db;
         }
 
-        tbody tr:hover {
-            background: #fafcff;
+
+        /* =========================================================
+           SUMMARY
+        ========================================================= */
+
+        .summary {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
         }
 
-        tbody tr:last-child td {
-            border-bottom: none;
+
+        .summary-card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.06);
         }
 
-        /* =====================================================
-           TIME
-           ===================================================== */
 
-        .time {
-            min-width: 125px;
-        }
-
-        .date {
-            display: block;
-
-            color: #111827;
-
+        .summary-title {
+            color: #6b7280;
             font-size: 13px;
-            font-weight: 600;
+            margin-bottom: 7px;
         }
 
-        .clock {
-            display: block;
 
-            margin-top: 3px;
-
-            color: #9ca3af;
-
-            font-size: 12px;
+        .summary-number {
+            font-size: 28px;
+            font-weight: bold;
         }
 
-        /* =====================================================
-           UNIT
-           ===================================================== */
+
+        /* =========================================================
+           HISTORY
+        ========================================================= */
+
+        .history-box {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+        }
+
+
+        .history-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 18px;
+        }
+
+
+        .history-header h2 {
+            margin: 0;
+            font-size: 21px;
+        }
+
+
+        .count-badge {
+            background: #e5e7eb;
+            color: #374151;
+            padding: 6px 11px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: bold;
+        }
+
+
+        .history-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+
+        .history-item {
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 16px;
+        }
+
+
+        .history-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 15px;
+        }
+
 
         .unit-code {
-            display: inline-flex;
-            align-items: center;
-
-            padding: 6px 9px;
-
-            background: #f3f4f6;
-
-            border-radius: 7px;
-
-            color: #111827;
-
-            font-family: monospace;
-
-            font-size: 13px;
-            font-weight: 700;
+            font-size: 17px;
+            font-weight: bold;
+            margin-bottom: 4px;
         }
+
 
         .unit-name {
-            color: #111827;
-
             font-size: 14px;
-            font-weight: 600;
+            color: #374151;
+            margin-bottom: 7px;
         }
 
-        /* =====================================================
-           ACTION BADGE
-           ===================================================== */
 
-        .action {
-            display: inline-flex;
-            align-items: center;
+        .history-description {
+            font-size: 14px;
+            line-height: 1.6;
+            color: #4b5563;
+        }
 
+
+        .history-meta {
+            margin-top: 10px;
+            font-size: 12px;
+            color: #6b7280;
+            line-height: 1.7;
+        }
+
+
+        /* =========================================================
+           ACTION BADGES
+        ========================================================= */
+
+        .action-badge {
+            display: inline-block;
             padding: 6px 10px;
-
             border-radius: 20px;
-
             font-size: 11px;
-            font-weight: 700;
-
+            font-weight: bold;
             white-space: nowrap;
         }
 
-        .keluar {
+
+        .action-keluar {
             background: #fee2e2;
             color: #991b1b;
         }
 
-        .masuk {
+
+        .action-masuk {
             background: #dcfce7;
             color: #166534;
         }
 
-        .transfer {
+
+        .action-edit {
             background: #dbeafe;
-            color: #1e40af;
+            color: #1d4ed8;
         }
 
-        .lainnya {
-            background: #f3f4f6;
+
+        .action-tambah {
+            background: #ede9fe;
+            color: #6d28d9;
+        }
+
+
+        .action-transfer {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+
+        .action-batal {
+            background: #ffedd5;
+            color: #c2410c;
+        }
+
+
+        .action-default {
+            background: #e5e7eb;
             color: #374151;
         }
 
-        /* =====================================================
-           DESCRIPTION
-           ===================================================== */
 
-        .description {
-            max-width: 300px;
-
-            color: #4b5563;
-
-            font-size: 13px;
-            line-height: 1.5;
-        }
-
-        /* =====================================================
-           USER & BRANCH
-           ===================================================== */
-
-        .user-name {
-            color: #111827;
-
-            font-weight: 600;
-        }
-
-        .branch-name {
-            display: inline-block;
-
-            padding: 5px 8px;
-
-            background: #f8fafc;
-
-            border: 1px solid #e5e7eb;
-            border-radius: 7px;
-
-            color: #4b5563;
-
-            font-size: 12px;
-        }
-
-        /* =====================================================
-           EMPTY STATE
-           ===================================================== */
+        /* =========================================================
+           EMPTY
+        ========================================================= */
 
         .empty {
-            padding: 60px 25px;
-
             text-align: center;
+            padding: 40px 15px;
+            color: #6b7280;
         }
+
 
         .empty-icon {
-            width: 58px;
-            height: 58px;
-
-            display: flex;
-            align-items: center;
-            justify-content: center;
-
-            margin: 0 auto 15px;
-
-            background: #f3f4f6;
-
-            border-radius: 50%;
-
-            color: #6b7280;
-
-            font-size: 25px;
+            font-size: 40px;
+            margin-bottom: 10px;
         }
 
-        .empty h3 {
-            margin: 0 0 7px;
 
-            font-size: 17px;
-        }
-
-        .empty p {
-            margin: 0;
-
-            color: #6b7280;
-
-            font-size: 14px;
-            line-height: 1.5;
-        }
-
-        /* =====================================================
-           MOBILE
-           ===================================================== */
+        /* =========================================================
+           RESPONSIVE
+        ========================================================= */
 
         @media (max-width: 700px) {
 
             .container {
-                width: 94%;
-                margin: 22px auto 35px;
+                padding: 15px 12px 35px;
             }
 
-            .page-title {
-                font-size: 25px;
+
+            .topbar {
+                flex-direction: column;
+                align-items: flex-start;
             }
 
-            .page-description {
-                font-size: 14px;
+
+            .topbar h1 {
+                font-size: 23px;
             }
+
+
+            .filter-form {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+
+            .filter-group select,
+            .filter-btn,
+            .reset-btn {
+                width: 100%;
+            }
+
 
             .summary {
-                padding: 15px;
+                grid-template-columns: 1fr;
             }
 
-            .summary-text {
-                font-size: 14px;
+
+            .history-top {
+                flex-direction: column;
             }
 
-            .summary-number {
-                min-width: 38px;
-                height: 38px;
 
-                font-size: 16px;
+            .action-badge {
+                align-self: flex-start;
             }
-
-            .card-header {
-                padding: 17px;
-            }
-
-            th,
-            td {
-                padding: 12px;
-            }
-
         }
 
     </style>
 
 </head>
 
+
 <body>
 
 <div class="container">
 
-    <!-- =====================================================
-         BACK
-         ===================================================== -->
 
-    <a
-        href="dashboard.php"
-        class="back"
-    >
-        ← Kembali ke Dashboard
-    </a>
+    <!-- ==========================================================
+         TOPBAR
+    =========================================================== -->
 
+    <div class="topbar">
 
-    <!-- =====================================================
-         PAGE HEADER
-         ===================================================== -->
-
-    <div class="page-header">
-
-        <h1 class="page-title">
-            Riwayat Unit
+        <h1>
+            📜 Riwayat Unit
         </h1>
 
-        <p class="page-description">
-            Pantau seluruh aktivitas unit yang tercatat
-            dalam sistem, termasuk unit keluar, unit masuk,
-            dan proses transfer antar cabang.
+
+        <a
+            href="dashboard.php"
+            class="back-btn"
+        >
+            ← Kembali ke Dashboard
+        </a>
+
+    </div>
+
+
+    <!-- ==========================================================
+         INFO CABANG
+    =========================================================== -->
+
+    <div class="info-box">
+
+        <h2>
+            <?= htmlspecialchars(user_branch_name()) ?>
+        </h2>
+
+        <p>
+            Riwayat aktivitas unit untuk
+            <?= htmlspecialchars($namaBulan[$selectedMonth]) ?>
+            <?= (int)$selectedYear ?>.
         </p>
 
     </div>
 
 
-    <!-- =====================================================
+    <!-- ==========================================================
+         FILTER
+    =========================================================== -->
+
+    <div class="filter-box">
+
+        <h2>
+            Filter Riwayat
+        </h2>
+
+
+        <form
+            method="GET"
+            action="riwayat.php"
+            class="filter-form"
+        >
+
+            <div class="filter-group">
+
+                <label for="bulan">
+                    Bulan
+                </label>
+
+                <select
+                    name="bulan"
+                    id="bulan"
+                >
+
+                    <?php foreach ($namaBulan as $nomor => $nama): ?>
+
+                        <option
+                            value="<?= (int)$nomor ?>"
+                            <?= $selectedMonth === $nomor ? 'selected' : '' ?>
+                        >
+                            <?= htmlspecialchars($nama) ?>
+                        </option>
+
+                    <?php endforeach; ?>
+
+                </select>
+
+            </div>
+
+
+            <div class="filter-group">
+
+                <label for="tahun">
+                    Tahun
+                </label>
+
+                <select
+                    name="tahun"
+                    id="tahun"
+                >
+
+                    <?php
+
+                    $startYear = min(
+                        2020,
+                        $selectedYear
+                    );
+
+                    $endYear = max(
+                        $currentYear,
+                        $selectedYear
+                    );
+
+                    for (
+                        $year = $endYear;
+                        $year >= $startYear;
+                        $year--
+                    ):
+                    ?>
+
+                        <option
+                            value="<?= (int)$year ?>"
+                            <?= $selectedYear === $year ? 'selected' : '' ?>
+                        >
+                            <?= (int)$year ?>
+                        </option>
+
+                    <?php endfor; ?>
+
+                </select>
+
+            </div>
+
+
+            <button
+                type="submit"
+                class="filter-btn"
+            >
+                🔍 Tampilkan
+            </button>
+
+
+            <a
+                href="riwayat.php"
+                class="reset-btn"
+            >
+                Bulan Ini
+            </a>
+
+        </form>
+
+    </div>
+
+
+    <!-- ==========================================================
          SUMMARY
-         ===================================================== -->
+    =========================================================== -->
 
     <div class="summary">
 
-        <div class="summary-left">
+        <div class="summary-card">
 
-            <div class="summary-icon">
-                ◷
+            <div class="summary-title">
+                Total Aktivitas
             </div>
 
-            <div>
-
-                <p class="summary-title">
-                    Total aktivitas
-                </p>
-
-                <p class="summary-text">
-                    Riwayat tercatat dalam sistem
-                </p>
-
+            <div class="summary-number">
+                <?= $totalHistory ?>
             </div>
 
         </div>
 
-        <div class="summary-number">
-            <?= $totalHistory ?>
+
+        <div class="summary-card">
+
+            <div class="summary-title">
+                Periode
+            </div>
+
+            <div class="summary-number">
+                <?= htmlspecialchars($namaBulan[$selectedMonth]) ?>
+                <?= (int)$selectedYear ?>
+            </div>
+
         </div>
 
     </div>
 
 
-    <!-- =====================================================
-         MAIN CARD
-         ===================================================== -->
+    <!-- ==========================================================
+         RIWAYAT
+    =========================================================== -->
 
-    <div class="card">
+    <div class="history-box">
 
-        <div class="card-header">
+        <div class="history-header">
 
             <h2>
-                Aktivitas Terbaru
+                Aktivitas
             </h2>
 
-            <p>
-                Data diurutkan dari aktivitas terbaru.
-            </p>
+            <span class="count-badge">
+                <?= $totalHistory ?> aktivitas
+            </span>
 
         </div>
 
 
-        <?php if ($totalHistory > 0): ?>
-
-            <div class="table-wrapper">
-
-                <table>
-
-                    <thead>
-
-                        <tr>
-
-                            <th>
-                                Waktu
-                            </th>
-
-                            <th>
-                                Kode Unit
-                            </th>
-
-                            <th>
-                                Nama Unit
-                            </th>
-
-                            <th>
-                                Aktivitas
-                            </th>
-
-                            <th>
-                                Keterangan
-                            </th>
-
-                            <th>
-                                Dilakukan Oleh
-                            </th>
-
-                            <th>
-                                Cabang
-                            </th>
-
-                        </tr>
-
-                    </thead>
-
-                    <tbody>
-
-                    <?php foreach ($history as $item): ?>
-
-                        <?php
-
-                        $actionClass = "lainnya";
-
-                        if (
-                            $item["action"] === "UNIT_KELUAR"
-                        ) {
-
-                            $actionClass = "keluar";
-
-                        } elseif (
-                            $item["action"] === "UNIT_MASUK"
-                        ) {
-
-                            $actionClass = "masuk";
-
-                        } elseif (
-                            strpos(
-                                $item["action"],
-                                "TRANSFER"
-                            ) !== false
-                        ) {
-
-                            $actionClass = "transfer";
-                        }
-
-                        $timestamp = strtotime(
-                            $item["created_at"]
-                        );
-
-                        ?>
-
-                        <tr>
-
-                            <!-- WAKTU -->
-
-                            <td class="time">
-
-                                <span class="date">
-
-                                    <?= htmlspecialchars(
-                                        date(
-                                            "d M Y",
-                                            $timestamp
-                                        ),
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
-
-                                </span>
-
-                                <span class="clock">
-
-                                    <?= htmlspecialchars(
-                                        date(
-                                            "H:i",
-                                            $timestamp
-                                        ),
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
-
-                                    WIB
-
-                                </span>
-
-                            </td>
-
-
-                            <!-- KODE UNIT -->
-
-                            <td>
-
-                                <span class="unit-code">
-
-                                    <?= htmlspecialchars(
-                                        $item["kode_unit"],
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
-
-                                </span>
-
-                            </td>
-
-
-                            <!-- NAMA UNIT -->
-
-                            <td>
-
-                                <span class="unit-name">
-
-                                    <?= htmlspecialchars(
-                                        $item["nama_unit"],
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
-
-                                </span>
-
-                            </td>
-
-
-                            <!-- AKTIVITAS -->
-
-                            <td>
-
-                                <span
-                                    class="action <?= htmlspecialchars(
-                                        $actionClass,
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>"
-                                >
-
-                                    <?= htmlspecialchars(
-                                        $item["action"],
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
-
-                                </span>
-
-                            </td>
-
-
-                            <!-- KETERANGAN -->
-
-                            <td>
-
-                                <div class="description">
-
-                                    <?= htmlspecialchars(
-                                        $item["description"] ?? "-",
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
-
-                                </div>
-
-                            </td>
-
-
-                            <!-- USER -->
-
-                            <td>
-
-                                <span class="user-name">
-
-                                    <?= htmlspecialchars(
-                                        $item["nama_user"],
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
-
-                                </span>
-
-                            </td>
-
-
-                            <!-- CABANG -->
-
-                            <td>
-
-                                <span class="branch-name">
-
-                                    <?= htmlspecialchars(
-                                        $item["nama_cabang"],
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
-
-                                </span>
-
-                            </td>
-
-                        </tr>
-
-                    <?php endforeach; ?>
-
-                    </tbody>
-
-                </table>
+        <?php if ($totalHistory === 0): ?>
+
+            <div class="empty">
+
+                <div class="empty-icon">
+                    📭
+                </div>
+
+                <div>
+                    Belum ada riwayat pada
+                    <strong>
+                        <?= htmlspecialchars($namaBulan[$selectedMonth]) ?>
+                        <?= (int)$selectedYear ?>
+                    </strong>.
+                </div>
 
             </div>
 
         <?php else: ?>
 
-            <!-- =================================================
-                 EMPTY STATE
-                 ================================================= -->
 
-            <div class="empty">
+            <div class="history-list">
 
-                <div class="empty-icon">
-                    ◷
-                </div>
 
-                <h3>
-                    Belum ada riwayat aktivitas
-                </h3>
+                <?php foreach ($history as $item): ?>
 
-                <p>
-                    Aktivitas unit seperti keluar, masuk,
-                    dan transfer akan muncul di halaman ini.
-                </p>
+                    <div class="history-item">
+
+
+                        <div class="history-top">
+
+
+                            <div>
+
+                                <div class="unit-code">
+                                    <?= htmlspecialchars($item['kode_unit']) ?>
+                                </div>
+
+
+                                <div class="unit-name">
+                                    <?= htmlspecialchars($item['nama_unit']) ?>
+                                </div>
+
+
+                                <div class="history-description">
+                                    <?= htmlspecialchars($item['description']) ?>
+                                </div>
+
+                            </div>
+
+
+                            <span
+                                class="action-badge <?= htmlspecialchars(actionClass($item['action'])) ?>"
+                            >
+                                <?= htmlspecialchars(actionLabel($item['action'])) ?>
+                            </span>
+
+                        </div>
+
+
+                        <div class="history-meta">
+
+                            Kategori:
+                            <?= htmlspecialchars($item['kategori']) ?>
+
+                            &nbsp; • &nbsp;
+
+                            Dilakukan oleh:
+                            <?= htmlspecialchars($item['performed_by_name'] ?? 'Sistem') ?>
+
+                            &nbsp; • &nbsp;
+
+                            <?= htmlspecialchars($item['created_at']) ?>
+
+                        </div>
+
+
+                    </div>
+
+                <?php endforeach; ?>
+
 
             </div>
 
         <?php endif; ?>
 
+
     </div>
+
 
 </div>
 

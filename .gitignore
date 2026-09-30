@@ -1,33 +1,40 @@
-# Environment / secrets
+# =========================
+# PHP / Local Development
+# =========================
+
+/vendor/
+/node_modules/
+
+# =========================
+# Environment / Secrets
+# =========================
+
 .env
 .env.*
 !.env.example
 
-# Local database configuration
-database.local.php
+# =========================
+# Local configuration
+# =========================
 
-# Backup files
-backup/
-*.sql
-*.sql.gz
+config/database.local.php
 
-# Temporary files
-*.log
-*.tmp
-*.temp
-
+# =========================
 # OS files
+# =========================
+
 .DS_Store
 Thumbs.db
-desktop.ini
 
-# Editor
+# =========================
+# IDE
+# =========================
+
 .vscode/
 .idea/
 
-# PHP temporary files
-*.cache
+# =========================
+# Logs
+# =========================
 
-# Local database configuration
-config/database.php
-config/database.local.php
+*.log

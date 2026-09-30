@@ -1,73 +1,310 @@
 <?php
 
-require_once "../config/auth.php";
-require_once "../config/database.php";
-require_once "../config/csrf.php";
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../config/auth.php';
+require_once __DIR__ . '/../config/csrf.php';
 
-verify_csrf();
+require_login();
 
-$branch_id = (int) $_SESSION["branch_id"];
-$user_id = (int) $_SESSION["user_id"];
+$error = $_SESSION['transfer_error'] ?? '';
+unset($_SESSION['transfer_error']);
+
+$success = $_SESSION['transfer_success'] ?? '';
+unset($_SESSION['transfer_success']);
 
 /*
 |--------------------------------------------------------------------------
-| Ambil nama cabang user dari database
+| Helper status
 |--------------------------------------------------------------------------
 */
+function status_class($status)
+{
+    switch ($status) {
+        case 'PENDING':
+            return 'pending';
 
-$stmt = $pdo->prepare("
-    SELECT nama_cabang
-    FROM branches
-    WHERE id = ?
-    LIMIT 1
-");
+        case 'SIAP_DI_KONFIRMASI':
+            return 'ready';
 
-$stmt->execute([$branch_id]);
+        case 'COMPLETED':
+            return 'completed';
 
-$current_branch = $stmt->fetch();
+        case 'REJECTED':
+            return 'rejected';
 
-if (!$current_branch) {
+        default:
+            return 'unknown';
+    }
+}
 
-    http_response_code(403);
-    die("Cabang pengguna tidak valid.");
+function status_label($status)
+{
+    switch ($status) {
+        case 'PENDING':
+            return 'PENDING';
 
+        case 'SIAP_DI_KONFIRMASI':
+            return 'SIAP DIKONFIRMASI';
+
+        case 'COMPLETED':
+            return 'SELESAI';
+
+        case 'REJECTED':
+            return 'DITOLAK';
+
+        default:
+            return $status;
+    }
 }
 
 /*
 |--------------------------------------------------------------------------
-| Unit milik cabang sendiri yang tersedia untuk ditransfer
+| Buat transfer baru
 |--------------------------------------------------------------------------
 */
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
-$stmt = $pdo->prepare("
-    SELECT
-        units.id,
-        units.kode_unit,
-        units.nama_unit,
-        units.kategori,
-        units.status
-    FROM units
-    WHERE units.owner_branch_id = ?
-      AND units.status = 'TERSEDIA'
-      AND NOT EXISTS (
-          SELECT 1
-          FROM unit_transfers
-          WHERE unit_transfers.unit_id = units.id
-            AND unit_transfers.status IN ('PENDING', 'APPROVED')
-      )
-    ORDER BY units.kode_unit ASC
-");
+    $action = $_POST['action'] ?? '';
 
-$stmt->execute([$branch_id]);
+    if ($action === 'buat_transfer') {
 
-$units = $stmt->fetchAll();
+        if (!verify_csrf($_POST['csrf_token'] ?? '')) {
+            $_SESSION['transfer_error'] = 'Token keamanan tidak valid.';
+            header("Location: transfer.php");
+            exit;
+        }
+
+        $unit_id = (int) ($_POST['unit_id'] ?? 0);
+        $to_branch_id = (int) ($_POST['to_branch_id'] ?? 0);
+
+        if ($unit_id <= 0 || $to_branch_id <= 0) {
+            $_SESSION['transfer_error'] =
+                'Unit dan cabang tujuan wajib dipilih.';
+
+            header("Location: transfer.php");
+            exit;
+        }
+
+        try {
+
+            $pdo->beginTransaction();
+
+            /*
+            |--------------------------------------------------------------------------
+            | Lock unit
+            |--------------------------------------------------------------------------
+            */
+            $stmt = $pdo->prepare("
+                SELECT
+                    id,
+                    kode_unit,
+                    nama_unit,
+                    kategori,
+                    jumlah,
+                    owner_branch_id,
+                    status
+                FROM units
+                WHERE id = ?
+                FOR UPDATE
+            ");
+
+            $stmt->execute([$unit_id]);
+            $unit = $stmt->fetch();
+
+            if (!$unit) {
+                throw new Exception('Unit tidak ditemukan.');
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Unit harus milik cabang user
+            |--------------------------------------------------------------------------
+            */
+            if ((int) $unit['owner_branch_id'] !== (int) user_branch_id()) {
+                throw new Exception(
+                    'Anda hanya dapat mentransfer unit milik cabang sendiri.'
+                );
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Unit harus tersedia
+            |--------------------------------------------------------------------------
+            */
+            if ($unit['status'] !== 'TERSEDIA') {
+                throw new Exception(
+                    'Unit yang akan ditransfer harus berstatus TERSEDIA.'
+                );
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Cabang tujuan tidak boleh sama
+            |--------------------------------------------------------------------------
+            */
+            if ($to_branch_id === (int) user_branch_id()) {
+                throw new Exception(
+                    'Cabang tujuan harus berbeda dengan cabang asal.'
+                );
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Pastikan cabang tujuan ada
+            |--------------------------------------------------------------------------
+            */
+            $stmt = $pdo->prepare("
+                SELECT id, nama_cabang
+                FROM branches
+                WHERE id = ?
+                LIMIT 1
+            ");
+
+            $stmt->execute([$to_branch_id]);
+            $target_branch = $stmt->fetch();
+
+            if (!$target_branch) {
+                throw new Exception(
+                    'Cabang tujuan tidak ditemukan.'
+                );
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Cek transfer aktif
+            |--------------------------------------------------------------------------
+            */
+            $stmt = $pdo->prepare("
+                SELECT id
+                FROM unit_transfers
+                WHERE unit_id = ?
+                  AND status IN ('PENDING', 'SIAP_DI_KONFIRMASI')
+                LIMIT 1
+                FOR UPDATE
+            ");
+
+            $stmt->execute([$unit_id]);
+
+            if ($stmt->fetch()) {
+                throw new Exception(
+                    'Unit ini masih memiliki transfer yang sedang diproses.'
+                );
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Buat transfer
+            |--------------------------------------------------------------------------
+            */
+            $stmt = $pdo->prepare("
+                INSERT INTO unit_transfers
+                (
+                    unit_id,
+                    from_branch_id,
+                    to_branch_id,
+                    requested_by,
+                    scanned_by,
+                    approved_by,
+                    status,
+                    requested_at,
+                    scanned_at,
+                    approved_at,
+                    completed_at
+                )
+                VALUES
+                (
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    NULL,
+                    NULL,
+                    'PENDING',
+                    NOW(),
+                    NULL,
+                    NULL,
+                    NULL
+                )
+            ");
+
+            $stmt->execute([
+                $unit['id'],
+                user_branch_id(),
+                $to_branch_id,
+                user_id()
+            ]);
+
+            /*
+            |--------------------------------------------------------------------------
+            | Riwayat
+            |--------------------------------------------------------------------------
+            */
+            $description =
+                'Permintaan transfer unit ' .
+                $unit['kode_unit'] .
+                ' dari ' .
+                user_branch_name() .
+                ' ke ' .
+                $target_branch['nama_cabang'] .
+                '.';
+
+            $stmt = $pdo->prepare("
+                INSERT INTO unit_history
+                (
+                    unit_id,
+                    performed_by,
+                    branch_id,
+                    action,
+                    description,
+                    created_at
+                )
+                VALUES
+                (
+                    ?,
+                    ?,
+                    ?,
+                    'TRANSFER',
+                    ?,
+                    NOW()
+                )
+            ");
+
+            $stmt->execute([
+                $unit['id'],
+                user_id(),
+                user_branch_id(),
+                $description
+            ]);
+
+            $pdo->commit();
+
+            $_SESSION['transfer_success'] =
+                'Permintaan transfer unit ' .
+                $unit['kode_unit'] .
+                ' berhasil dibuat. Silakan lakukan scan QR unit.';
+
+            header("Location: transfer.php");
+            exit;
+
+        } catch (Throwable $e) {
+
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+
+            $_SESSION['transfer_error'] = $e->getMessage();
+
+            header("Location: transfer.php");
+            exit;
+        }
+    }
+}
 
 /*
 |--------------------------------------------------------------------------
-| Daftar cabang tujuan
+| Ambil semua cabang
 |--------------------------------------------------------------------------
 */
-
 $stmt = $pdo->prepare("
     SELECT
         id,
@@ -77,75 +314,114 @@ $stmt = $pdo->prepare("
     ORDER BY nama_cabang ASC
 ");
 
-$stmt->execute([$branch_id]);
-
+$stmt->execute([user_branch_id()]);
 $branches = $stmt->fetchAll();
 
 /*
 |--------------------------------------------------------------------------
-| Transfer yang dibuat oleh user ini
+| Ambil unit milik cabang sendiri
 |--------------------------------------------------------------------------
 */
-
 $stmt = $pdo->prepare("
     SELECT
-        unit_transfers.id,
-        unit_transfers.status,
-        unit_transfers.requested_at,
-        unit_transfers.approved_at,
-        unit_transfers.completed_at,
-        units.kode_unit,
-        units.nama_unit,
-        from_branch.nama_cabang AS dari_cabang,
-        to_branch.nama_cabang AS ke_cabang
-    FROM unit_transfers
-    INNER JOIN units
-        ON unit_transfers.unit_id = units.id
-    INNER JOIN branches AS from_branch
-        ON unit_transfers.from_branch_id = from_branch.id
-    INNER JOIN branches AS to_branch
-        ON unit_transfers.to_branch_id = to_branch.id
-    WHERE unit_transfers.requested_by = ?
-    ORDER BY unit_transfers.id DESC
+        u.id,
+        u.kode_unit,
+        u.nama_unit,
+        u.kategori,
+        u.jumlah,
+        u.status
+    FROM units u
+    WHERE u.owner_branch_id = ?
+    ORDER BY
+        u.kategori ASC,
+        u.nama_unit ASC,
+        u.kode_unit ASC
 ");
 
-$stmt->execute([$user_id]);
-
-$transfers = $stmt->fetchAll();
+$stmt->execute([user_branch_id()]);
+$units = $stmt->fetchAll();
 
 /*
 |--------------------------------------------------------------------------
-| Transfer APPROVED yang masuk ke cabang saya
+| Transfer keluar dari cabang sendiri
 |--------------------------------------------------------------------------
 */
-
 $stmt = $pdo->prepare("
     SELECT
-        unit_transfers.id,
-        unit_transfers.status,
-        unit_transfers.approved_at,
-        units.kode_unit,
-        units.nama_unit,
-        from_branch.nama_cabang AS dari_cabang,
-        to_branch.nama_cabang AS ke_cabang
-    FROM unit_transfers
-    INNER JOIN units
-        ON unit_transfers.unit_id = units.id
-    INNER JOIN branches AS from_branch
-        ON unit_transfers.from_branch_id = from_branch.id
-    INNER JOIN branches AS to_branch
-        ON unit_transfers.to_branch_id = to_branch.id
-    WHERE unit_transfers.to_branch_id = ?
-      AND unit_transfers.status = 'APPROVED'
-    ORDER BY unit_transfers.approved_at DESC
+        ut.id,
+        ut.status,
+        ut.requested_at,
+        ut.scanned_at,
+        ut.approved_at,
+        ut.completed_at,
+
+        u.kode_unit,
+        u.nama_unit,
+        u.kategori,
+
+        fb.nama_cabang AS from_branch_name,
+        tb.nama_cabang AS to_branch_name
+
+    FROM unit_transfers ut
+
+    INNER JOIN units u
+        ON u.id = ut.unit_id
+
+    INNER JOIN branches fb
+        ON fb.id = ut.from_branch_id
+
+    INNER JOIN branches tb
+        ON tb.id = ut.to_branch_id
+
+    WHERE ut.from_branch_id = ?
+
+    ORDER BY ut.id DESC
 ");
 
-$stmt->execute([$branch_id]);
+$stmt->execute([user_branch_id()]);
+$outgoing_transfers = $stmt->fetchAll();
 
+/*
+|--------------------------------------------------------------------------
+| Transfer masuk ke cabang sendiri
+|--------------------------------------------------------------------------
+*/
+$stmt = $pdo->prepare("
+    SELECT
+        ut.id,
+        ut.status,
+        ut.requested_at,
+        ut.scanned_at,
+        ut.approved_at,
+        ut.completed_at,
+
+        u.kode_unit,
+        u.nama_unit,
+        u.kategori,
+
+        fb.nama_cabang AS from_branch_name,
+        tb.nama_cabang AS to_branch_name
+
+    FROM unit_transfers ut
+
+    INNER JOIN units u
+        ON u.id = ut.unit_id
+
+    INNER JOIN branches fb
+        ON fb.id = ut.from_branch_id
+
+    INNER JOIN branches tb
+        ON tb.id = ut.to_branch_id
+
+    WHERE ut.to_branch_id = ?
+
+    ORDER BY ut.id DESC
+");
+
+$stmt->execute([user_branch_id()]);
 $incoming_transfers = $stmt->fetchAll();
 
 ?>
-
 <!DOCTYPE html>
 <html lang="id">
 
@@ -158,7 +434,7 @@ $incoming_transfers = $stmt->fetchAll();
         content="width=device-width, initial-scale=1.0"
     >
 
-    <title>Transfer Unit - Sistem Scan Unit</title>
+    <title>Transfer Unit</title>
 
     <style>
 
@@ -168,704 +444,246 @@ $incoming_transfers = $stmt->fetchAll();
 
         body {
             margin: 0;
-
-            font-family:
-                Arial,
-                Helvetica,
-                sans-serif;
-
-            background: #f5f7fb;
-            color: #111827;
+            font-family: Arial, Helvetica, sans-serif;
+            background: #f4f6f8;
+            color: #1f2937;
         }
 
         .container {
-            width: 92%;
-            max-width: 1150px;
-
-            margin: 32px auto 50px;
+            width: 100%;
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 20px;
         }
 
-        /* =====================================================
-           BACK
-           ===================================================== */
+        .topbar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
 
         .back {
-            display: inline-flex;
-            align-items: center;
-            gap: 7px;
-
-            margin-bottom: 22px;
-
-            color: #2563eb;
             text-decoration: none;
-
-            font-size: 14px;
-            font-weight: 600;
-
-            transition: 0.2s;
-        }
-
-        .back:hover {
-            color: #1d4ed8;
-        }
-
-        /* =====================================================
-           HEADER
-           ===================================================== */
-
-        .page-header {
-            display: flex;
-            align-items: flex-start;
-            justify-content: space-between;
-            gap: 20px;
-
-            margin-bottom: 22px;
-        }
-
-        .page-title {
-            margin: 0 0 7px;
-
-            font-size: 30px;
-            line-height: 1.2;
-            font-weight: 700;
-
-            letter-spacing: -0.5px;
-        }
-
-        .page-description {
-            margin: 0;
-
-            max-width: 700px;
-
-            color: #6b7280;
-
-            font-size: 15px;
-            line-height: 1.6;
-        }
-
-        .branch-badge {
-            flex-shrink: 0;
-
-            padding: 9px 13px;
-
-            background: #eff6ff;
-
-            border: 1px solid #bfdbfe;
-            border-radius: 9px;
-
-            color: #1e40af;
-
-            font-size: 13px;
-            font-weight: 600;
-        }
-
-        /* =====================================================
-           SUMMARY
-           ===================================================== */
-
-        .summary-grid {
-            display: grid;
-
-            grid-template-columns:
-                repeat(3, 1fr);
-
-            gap: 15px;
-
-            margin-bottom: 22px;
-        }
-
-        .summary-card {
-            display: flex;
-            align-items: center;
-            gap: 13px;
-
-            padding: 17px;
-
-            background: #ffffff;
-
-            border: 1px solid #e5e7eb;
-            border-radius: 14px;
-
-            box-shadow:
-                0 3px 12px rgba(15, 23, 42, 0.04);
-        }
-
-        .summary-icon {
-            width: 42px;
-            height: 42px;
-
-            display: flex;
-            align-items: center;
-            justify-content: center;
-
-            flex-shrink: 0;
-
-            border-radius: 11px;
-
-            font-size: 19px;
-        }
-
-        .icon-blue {
-            background: #eff6ff;
             color: #2563eb;
+            font-weight: bold;
         }
 
-        .icon-yellow {
-            background: #fffbeb;
-            color: #d97706;
-        }
-
-        .icon-green {
-            background: #ecfdf5;
-            color: #16a34a;
-        }
-
-        .summary-label {
-            margin: 0 0 3px;
-
-            color: #6b7280;
-
-            font-size: 12px;
-        }
-
-        .summary-value {
+        h1 {
             margin: 0;
-
-            color: #111827;
-
-            font-size: 19px;
-            font-weight: 700;
+            font-size: 27px;
         }
 
-        /* =====================================================
-           CARD
-           ===================================================== */
+        h2 {
+            margin-top: 0;
+        }
+
+        h3 {
+            margin-bottom: 8px;
+        }
 
         .card {
-            margin-bottom: 20px;
-
             background: #ffffff;
-
-            border: 1px solid #e5e7eb;
-            border-radius: 16px;
-
-            overflow: hidden;
-
-            box-shadow:
-                0 4px 18px rgba(15, 23, 42, 0.05);
+            border-radius: 14px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.06);
         }
 
-        .card-header {
-            padding: 20px 22px;
-
-            border-bottom: 1px solid #e5e7eb;
+        .alert {
+            padding: 13px 15px;
+            border-radius: 9px;
+            margin-bottom: 18px;
+            font-size: 14px;
         }
 
-        .card-header h2 {
-            margin: 0 0 5px;
-
-            font-size: 18px;
+        .alert-error {
+            background: #fee2e2;
+            color: #991b1b;
         }
 
-        .card-header p {
-            margin: 0;
-
-            color: #6b7280;
-
-            font-size: 13px;
-            line-height: 1.5;
+        .alert-success {
+            background: #dcfce7;
+            color: #166534;
         }
-
-        .card-body {
-            padding: 22px;
-        }
-
-        /* =====================================================
-           FORM
-           ===================================================== */
 
         .form-grid {
             display: grid;
-
-            grid-template-columns:
-                1fr 1fr;
-
-            gap: 18px;
-        }
-
-        .form-group {
-            margin-bottom: 0;
+            grid-template-columns: 1fr 1fr auto;
+            gap: 12px;
+            align-items: end;
         }
 
         label {
             display: block;
-
+            font-weight: bold;
             margin-bottom: 7px;
-
-            color: #374151;
-
-            font-size: 13px;
-            font-weight: 700;
         }
 
         select {
             width: 100%;
-
-            padding: 12px 13px;
-
-            background: #ffffff;
-
+            padding: 12px;
             border: 1px solid #d1d5db;
             border-radius: 9px;
-
-            color: #111827;
-
-            font-size: 14px;
-
-            outline: none;
-
-            cursor: pointer;
-
-            transition:
-                border-color 0.2s,
-                box-shadow 0.2s;
+            background: #ffffff;
+            font-size: 15px;
         }
 
         select:focus {
+            outline: none;
             border-color: #2563eb;
-
-            box-shadow:
-                0 0 0 3px rgba(37, 99, 235, 0.12);
         }
 
-        .form-action {
-            margin-top: 18px;
-        }
-
-        .primary-button {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 7px;
-
-            width: 100%;
-
-            padding: 12px 15px;
-
-            border: none;
+        button {
+            border: 0;
+            cursor: pointer;
             border-radius: 9px;
+            padding: 12px 16px;
+            font-size: 14px;
+            font-weight: bold;
+        }
 
+        .btn-primary {
             background: #2563eb;
             color: #ffffff;
-
-            font-size: 14px;
-            font-weight: 700;
-
-            cursor: pointer;
-
-            transition:
-                background 0.2s,
-                transform 0.1s;
         }
 
-        .primary-button:hover {
+        .btn-primary:hover {
             background: #1d4ed8;
         }
 
-        .primary-button:active {
-            transform: scale(0.99);
+        .btn-success {
+            background: #16a34a;
+            color: #ffffff;
         }
 
-        /* =====================================================
-           NOTICE
-           ===================================================== */
-
-        .notice {
-            display: flex;
-            align-items: flex-start;
-            gap: 10px;
-
-            margin-bottom: 18px;
-
-            padding: 13px 15px;
-
-            background: #eff6ff;
-
-            border: 1px solid #bfdbfe;
-            border-radius: 10px;
-
-            color: #1e40af;
-
-            font-size: 13px;
-            line-height: 1.5;
+        .btn-success:hover {
+            background: #15803d;
         }
 
-        .notice-icon {
-            flex-shrink: 0;
-
-            font-size: 16px;
+        .btn-secondary {
+            background: #e5e7eb;
+            color: #1f2937;
         }
 
-        /* =====================================================
-           TABLE
-           ===================================================== */
+        .btn-secondary:hover {
+            background: #d1d5db;
+        }
 
         .table-wrapper {
             width: 100%;
-
             overflow-x: auto;
         }
 
         table {
             width: 100%;
-
-            min-width: 850px;
-
             border-collapse: collapse;
+            min-width: 850px;
+        }
+
+        th,
+        td {
+            padding: 12px 10px;
+            border-bottom: 1px solid #e5e7eb;
+            text-align: left;
+            vertical-align: middle;
         }
 
         th {
-            padding: 13px 16px;
-
             background: #f8fafc;
-
-            color: #6b7280;
-
-            font-size: 11px;
-            font-weight: 700;
-
-            text-align: left;
-
-            text-transform: uppercase;
-            letter-spacing: 0.3px;
-
-            border-bottom: 1px solid #e5e7eb;
-
-            white-space: nowrap;
+            font-size: 13px;
         }
 
         td {
-            padding: 15px 16px;
-
-            border-bottom: 1px solid #f1f5f9;
-
-            vertical-align: middle;
-
             font-size: 14px;
         }
 
-        tbody tr {
-            transition: background 0.15s ease;
-        }
-
-        tbody tr:hover {
-            background: #fafcff;
-        }
-
-        tbody tr:last-child td {
-            border-bottom: none;
-        }
-
-        /* =====================================================
-           UNIT
-           ===================================================== */
-
-        .unit-code {
-            display: inline-flex;
-
-            padding: 6px 9px;
-
-            background: #f3f4f6;
-
-            border-radius: 7px;
-
-            color: #111827;
-
-            font-family: monospace;
-
-            font-size: 13px;
-            font-weight: 700;
-        }
-
-        .unit-name {
-            margin-top: 5px;
-
-            color: #6b7280;
-
-            font-size: 12px;
-        }
-
-        /* =====================================================
-           TRANSFER ROUTE
-           ===================================================== */
-
-        .branch-route {
-            display: flex;
-            align-items: center;
-            gap: 7px;
-
-            white-space: nowrap;
-        }
-
-        .branch {
-            color: #374151;
-
-            font-size: 13px;
-            font-weight: 600;
-        }
-
-        .arrow {
-            color: #9ca3af;
-        }
-
-        /* =====================================================
-           STATUS
-           ===================================================== */
-
         .status {
-            display: inline-flex;
-            align-items: center;
-            gap: 5px;
-
+            display: inline-block;
             padding: 6px 10px;
-
-            border-radius: 20px;
-
-            font-size: 11px;
-            font-weight: 700;
-
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: bold;
             white-space: nowrap;
         }
 
-        .pending {
+        .status.pending {
             background: #fef3c7;
             color: #92400e;
         }
 
-        .approved {
-            background: #dcfce7;
-            color: #166534;
-        }
-
-        .rejected {
-            background: #fee2e2;
-            color: #991b1b;
-        }
-
-        .completed {
+        .status.ready {
             background: #dbeafe;
             color: #1e40af;
         }
 
-        /* =====================================================
-           ACTIONS
-           ===================================================== */
+        .status.completed {
+            background: #dcfce7;
+            color: #166534;
+        }
 
-        .actions {
+        .status.rejected {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .status.unknown {
+            background: #e5e7eb;
+            color: #374151;
+        }
+
+        .action {
             display: flex;
-            align-items: center;
             gap: 7px;
             flex-wrap: wrap;
         }
 
-        .action-form {
-            margin: 0;
-        }
-
-        .action-button {
-            padding: 8px 11px;
-
-            border: none;
-            border-radius: 8px;
-
-            color: #ffffff;
-
-            font-size: 12px;
-            font-weight: 700;
-
-            cursor: pointer;
-
-            transition:
-                background 0.2s,
-                transform 0.1s;
-        }
-
-        .action-button:active {
-            transform: scale(0.98);
-        }
-
-        .approve-button {
-            background: #16a34a;
-        }
-
-        .approve-button:hover {
-            background: #15803d;
-        }
-
-        .reject-button {
-            background: #dc2626;
-        }
-
-        .reject-button:hover {
-            background: #b91c1c;
-        }
-
-        .scan-button {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-
+        .action a {
+            display: inline-block;
+            text-decoration: none;
             padding: 9px 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: bold;
+        }
 
+        .action-scan {
             background: #2563eb;
             color: #ffffff;
-
-            border-radius: 8px;
-
-            text-decoration: none;
-
-            font-size: 12px;
-            font-weight: 700;
-
-            transition: background 0.2s;
         }
-
-        .scan-button:hover {
-            background: #1d4ed8;
-        }
-
-        /* =====================================================
-           TIME
-           ===================================================== */
-
-        .time {
-            white-space: nowrap;
-        }
-
-        .date {
-            display: block;
-
-            color: #374151;
-
-            font-size: 13px;
-            font-weight: 600;
-        }
-
-        .clock {
-            display: block;
-
-            margin-top: 3px;
-
-            color: #9ca3af;
-
-            font-size: 11px;
-        }
-
-        /* =====================================================
-           EMPTY STATE
-           ===================================================== */
 
         .empty {
-            padding: 45px 25px;
-
+            padding: 25px;
             text-align: center;
+            color: #64748b;
+            background: #f8fafc;
+            border-radius: 10px;
         }
 
-        .empty-icon {
-            width: 54px;
-            height: 54px;
-
-            display: flex;
-            align-items: center;
-            justify-content: center;
-
-            margin: 0 auto 13px;
-
-            background: #f3f4f6;
-
-            border-radius: 50%;
-
-            color: #6b7280;
-
-            font-size: 22px;
-        }
-
-        .empty h3 {
-            margin: 0 0 6px;
-
-            font-size: 16px;
-        }
-
-        .empty p {
-            margin: 0;
-
-            color: #6b7280;
-
+        .info-text {
+            margin-top: 5px;
+            color: #64748b;
             font-size: 13px;
-            line-height: 1.5;
         }
-
-        /* =====================================================
-           INCOMING HIGHLIGHT
-           ===================================================== */
-
-        .incoming-card {
-            border-color: #bfdbfe;
-        }
-
-        .incoming-card .card-header {
-            background: #f8fbff;
-        }
-
-        /* =====================================================
-           MOBILE
-           ===================================================== */
 
         @media (max-width: 800px) {
-
-            .container {
-                width: 94%;
-
-                margin:
-                    22px auto
-                    35px;
-            }
-
-            .page-header {
-                display: block;
-            }
-
-            .branch-badge {
-                display: inline-block;
-
-                margin-top: 13px;
-            }
-
-            .page-title {
-                font-size: 25px;
-            }
-
-            .page-description {
-                font-size: 14px;
-            }
-
-            .summary-grid {
-                grid-template-columns: 1fr;
-            }
 
             .form-grid {
                 grid-template-columns: 1fr;
             }
 
-            .card-body {
-                padding: 17px;
+            .container {
+                padding: 14px;
             }
 
-            table {
-                min-width: 850px;
+            .card {
+                padding: 16px;
             }
 
+            h1 {
+                font-size: 23px;
+            }
         }
 
     </style>
@@ -876,357 +694,167 @@ $incoming_transfers = $stmt->fetchAll();
 
 <div class="container">
 
-    <!-- =====================================================
-         BACK
-         ===================================================== -->
+    <div class="topbar">
 
-    <a
-        href="dashboard.php"
-        class="back"
-    >
-        ← Kembali ke Dashboard
-    </a>
+        <a href="dashboard.php" class="back">
+            ← Dashboard
+        </a>
 
-
-    <!-- =====================================================
-         HEADER
-         ===================================================== -->
-
-    <div class="page-header">
-
-        <div>
-
-            <h1 class="page-title">
-                Transfer / Oper Unit
-            </h1>
-
-            <p class="page-description">
-                Kelola perpindahan unit antar cabang dengan
-                proses persetujuan dan penerimaan menggunakan QR.
-            </p>
-
-        </div>
-
-        <div class="branch-badge">
-
-            Cabang:
-            <?= htmlspecialchars(
-                $current_branch["nama_cabang"],
-                ENT_QUOTES,
-                "UTF-8"
-            ) ?>
-
-        </div>
+        <h1>
+            Transfer Unit
+        </h1>
 
     </div>
 
+    <?php if ($error): ?>
 
-    <!-- =====================================================
-         SUMMARY
-         ===================================================== -->
-
-    <div class="summary-grid">
-
-        <div class="summary-card">
-
-            <div class="summary-icon icon-blue">
-                ⇄
-            </div>
-
-            <div>
-
-                <p class="summary-label">
-                    Unit siap ditransfer
-                </p>
-
-                <p class="summary-value">
-                    <?= count($units) ?>
-                </p>
-
-            </div>
-
+        <div class="alert alert-error">
+            <?= htmlspecialchars($error) ?>
         </div>
 
+    <?php endif; ?>
 
-        <div class="summary-card">
+    <?php if ($success): ?>
 
-            <div class="summary-icon icon-yellow">
-                ◷
-            </div>
-
-            <div>
-
-                <p class="summary-label">
-                    Transfer saya
-                </p>
-
-                <p class="summary-value">
-                    <?= count($transfers) ?>
-                </p>
-
-            </div>
-
+        <div class="alert alert-success">
+            <?= htmlspecialchars($success) ?>
         </div>
 
-
-        <div class="summary-card">
-
-            <div class="summary-icon icon-green">
-                ↓
-            </div>
-
-            <div>
-
-                <p class="summary-label">
-                    Transfer masuk
-                </p>
-
-                <p class="summary-value">
-                    <?= count($incoming_transfers) ?>
-                </p>
-
-            </div>
-
-        </div>
-
-    </div>
+    <?php endif; ?>
 
 
-    <!-- =====================================================
-         AJUKAN TRANSFER
-         ===================================================== -->
+    <!-- ==========================================================
+         BUAT TRANSFER
+         ========================================================== -->
 
     <div class="card">
 
-        <div class="card-header">
+        <h2>
+            Buat Transfer Baru
+        </h2>
 
-            <h2>
-                Ajukan Transfer Unit
-            </h2>
+        <p class="info-text">
+            Pilih unit milik cabang Anda dan tentukan cabang tujuan.
+            Setelah dibuat, unit harus discan terlebih dahulu.
+        </p>
 
-            <p>
-                Pilih unit yang tersedia dan tentukan cabang
-                tujuan transfer.
-            </p>
+        <form method="POST">
 
-        </div>
+            <input
+                type="hidden"
+                name="action"
+                value="buat_transfer"
+            >
 
-        <div class="card-body">
+            <input
+                type="hidden"
+                name="csrf_token"
+                value="<?= htmlspecialchars(csrf_token()) ?>"
+            >
 
-            <?php if (count($units) === 0): ?>
+            <div class="form-grid">
 
-                <div class="empty">
+                <div>
 
-                    <div class="empty-icon">
-                        ✓
-                    </div>
+                    <label for="unit_id">
+                        Unit
+                    </label>
 
-                    <h3>
-                        Tidak ada unit yang siap ditransfer
-                    </h3>
-
-                    <p>
-                        Unit harus berstatus tersedia dan tidak
-                        sedang dalam proses transfer.
-                    </p>
-
-                </div>
-
-            <?php elseif (count($branches) === 0): ?>
-
-                <div class="empty">
-
-                    <div class="empty-icon">
-                        !
-                    </div>
-
-                    <h3>
-                        Belum ada cabang tujuan
-                    </h3>
-
-                    <p>
-                        Tidak tersedia cabang lain sebagai
-                        tujuan transfer.
-                    </p>
-
-                </div>
-
-            <?php else: ?>
-
-                <div class="notice">
-
-                    <div class="notice-icon">
-                        ℹ
-                    </div>
-
-                    <div>
-                        Setelah transfer diajukan, permintaan
-                        harus disetujui terlebih dahulu sebelum
-                        cabang tujuan dapat menerima unit.
-                    </div>
-
-                </div>
-
-
-                <form
-                    action="proses-transfer.php"
-                    method="POST"
-                >
-
-                    <?= csrf_field() ?>
-
-                    <input
-                        type="hidden"
-                        name="action"
-                        value="buat"
+                    <select
+                        name="unit_id"
+                        id="unit_id"
+                        required
                     >
 
-                    <div class="form-grid">
+                        <option value="">
+                            -- Pilih Unit --
+                        </option>
 
-                        <!-- UNIT -->
+                        <?php foreach ($units as $unit): ?>
 
-                        <div class="form-group">
-
-                            <label for="unit_id">
-                                Unit
-                            </label>
-
-                            <select
-                                id="unit_id"
-                                name="unit_id"
-                                required
+                            <option
+                                value="<?= (int) $unit['id'] ?>"
+                                <?= $unit['status'] !== 'TERSEDIA' ? 'disabled' : '' ?>
                             >
+                                <?= htmlspecialchars($unit['kode_unit']) ?>
+                                -
+                                <?= htmlspecialchars($unit['nama_unit']) ?>
+                                [<?= htmlspecialchars($unit['kategori']) ?>]
+                                <?= $unit['status'] !== 'TERSEDIA'
+                                    ? ' - ' . htmlspecialchars($unit['status'])
+                                    : '' ?>
+                            </option>
 
-                                <option value="">
-                                    -- Pilih Unit --
-                                </option>
+                        <?php endforeach; ?>
 
-                                <?php foreach ($units as $unit): ?>
+                    </select>
 
-                                    <option
-                                        value="<?= (int) $unit["id"] ?>"
-                                    >
-
-                                        <?= htmlspecialchars(
-                                            $unit["kode_unit"],
-                                            ENT_QUOTES,
-                                            "UTF-8"
-                                        ) ?>
-
-                                        -
-                                        <?= htmlspecialchars(
-                                            $unit["nama_unit"],
-                                            ENT_QUOTES,
-                                            "UTF-8"
-                                        ) ?>
-
-                                    </option>
-
-                                <?php endforeach; ?>
-
-                            </select>
-
-                        </div>
+                </div>
 
 
-                        <!-- CABANG TUJUAN -->
+                <div>
 
-                        <div class="form-group">
+                    <label for="to_branch_id">
+                        Cabang Tujuan
+                    </label>
 
-                            <label for="to_branch_id">
-                                Cabang Tujuan
-                            </label>
+                    <select
+                        name="to_branch_id"
+                        id="to_branch_id"
+                        required
+                    >
 
-                            <select
-                                id="to_branch_id"
-                                name="to_branch_id"
-                                required
+                        <option value="">
+                            -- Pilih Cabang Tujuan --
+                        </option>
+
+                        <?php foreach ($branches as $branch): ?>
+
+                            <option
+                                value="<?= (int) $branch['id'] ?>"
                             >
+                                <?= htmlspecialchars($branch['nama_cabang']) ?>
+                            </option>
 
-                                <option value="">
-                                    -- Pilih Cabang Tujuan --
-                                </option>
+                        <?php endforeach; ?>
 
-                                <?php foreach ($branches as $branch): ?>
+                    </select>
 
-                                    <option
-                                        value="<?= (int) $branch["id"] ?>"
-                                    >
-
-                                        <?= htmlspecialchars(
-                                            $branch["nama_cabang"],
-                                            ENT_QUOTES,
-                                            "UTF-8"
-                                        ) ?>
-
-                                    </option>
-
-                                <?php endforeach; ?>
-
-                            </select>
-
-                        </div>
-
-                    </div>
+                </div>
 
 
-                    <div class="form-action">
+                <div>
 
-                        <button
-                            type="submit"
-                            class="primary-button"
-                        >
-                            ⇄ Ajukan Transfer
-                        </button>
+                    <button
+                        type="submit"
+                        class="btn-primary"
+                    >
+                        Buat Transfer
+                    </button>
 
-                    </div>
+                </div>
 
-                </form>
+            </div>
 
-            <?php endif; ?>
-
-        </div>
+        </form>
 
     </div>
 
 
-    <!-- =====================================================
-         TRANSFER SAYA
-         ===================================================== -->
+    <!-- ==========================================================
+         TRANSFER KELUAR
+         ========================================================== -->
 
     <div class="card">
 
-        <div class="card-header">
+        <h2>
+            Transfer Keluar
+        </h2>
 
-            <h2>
-                Transfer yang Saya Ajukan
-            </h2>
-
-            <p>
-                Pantau status transfer unit yang diajukan
-                oleh akun Anda.
-            </p>
-
-        </div>
-
-
-        <?php if (count($transfers) === 0): ?>
+        <?php if (!$outgoing_transfers): ?>
 
             <div class="empty">
-
-                <div class="empty-icon">
-                    ◷
-                </div>
-
-                <h3>
-                    Belum ada transfer
-                </h3>
-
-                <p>
-                    Transfer yang Anda ajukan akan muncul
-                    di bagian ini.
-                </p>
-
+                Belum ada transfer keluar.
             </div>
 
         <?php else: ?>
@@ -1244,7 +872,11 @@ $incoming_transfers = $stmt->fetchAll();
                             </th>
 
                             <th>
-                                Perpindahan
+                                Kategori
+                            </th>
+
+                            <th>
+                                Tujuan
                             </th>
 
                             <th>
@@ -1252,7 +884,11 @@ $incoming_transfers = $stmt->fetchAll();
                             </th>
 
                             <th>
-                                Waktu Pengajuan
+                                Dibuat
+                            </th>
+
+                            <th>
+                                Aksi
                             </th>
 
                         </tr>
@@ -1261,252 +897,74 @@ $incoming_transfers = $stmt->fetchAll();
 
                     <tbody>
 
-                    <?php foreach ($transfers as $transfer): ?>
-
-                        <?php
-
-                        $status_class = strtolower(
-                            $transfer["status"]
-                        );
-
-                        ?>
+                    <?php foreach ($outgoing_transfers as $transfer): ?>
 
                         <tr>
 
-                            <!-- UNIT -->
-
                             <td>
 
-                                <span class="unit-code">
+                                <strong>
+                                    <?= htmlspecialchars($transfer['kode_unit']) ?>
+                                </strong>
 
-                                    <?= htmlspecialchars(
-                                        $transfer["kode_unit"],
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
+                                <br>
 
-                                </span>
-
-                                <div class="unit-name">
-
-                                    <?= htmlspecialchars(
-                                        $transfer["nama_unit"],
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
-
-                                </div>
+                                <?= htmlspecialchars($transfer['nama_unit']) ?>
 
                             </td>
 
-
-                            <!-- ROUTE -->
-
                             <td>
-
-                                <div class="branch-route">
-
-                                    <span class="branch">
-
-                                        <?= htmlspecialchars(
-                                            $transfer["dari_cabang"],
-                                            ENT_QUOTES,
-                                            "UTF-8"
-                                        ) ?>
-
-                                    </span>
-
-                                    <span class="arrow">
-                                        →
-                                    </span>
-
-                                    <span class="branch">
-
-                                        <?= htmlspecialchars(
-                                            $transfer["ke_cabang"],
-                                            ENT_QUOTES,
-                                            "UTF-8"
-                                        ) ?>
-
-                                    </span>
-
-                                </div>
-
+                                <?= htmlspecialchars($transfer['kategori']) ?>
                             </td>
 
-
-                            <!-- STATUS -->
+                            <td>
+                                <?= htmlspecialchars($transfer['to_branch_name']) ?>
+                            </td>
 
                             <td>
 
                                 <span
-                                    class="status <?= htmlspecialchars(
-                                        $status_class,
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>"
+                                    class="status <?= status_class($transfer['status']) ?>"
                                 >
-
-                                    <?php if (
-                                        $transfer["status"] === "PENDING"
-                                    ): ?>
-
-                                        ◷
-
-                                    <?php elseif (
-                                        $transfer["status"] === "APPROVED"
-                                    ): ?>
-
-                                        ✓
-
-                                    <?php elseif (
-                                        $transfer["status"] === "REJECTED"
-                                    ): ?>
-
-                                        ×
-
-                                    <?php elseif (
-                                        $transfer["status"] === "COMPLETED"
-                                    ): ?>
-
-                                        ✓
-
-                                    <?php endif; ?>
-
                                     <?= htmlspecialchars(
-                                        $transfer["status"],
-                                        ENT_QUOTES,
-                                        "UTF-8"
+                                        status_label($transfer['status'])
                                     ) ?>
-
                                 </span>
-
-
-                                <?php if (
-                                    $transfer["status"] === "PENDING"
-                                ): ?>
-
-                                    <div class="actions" style="margin-top: 10px;">
-
-                                        <!-- SETUJUI -->
-
-                                        <form
-                                            class="action-form"
-                                            action="proses-transfer.php"
-                                            method="POST"
-                                            onsubmit="
-                                                return confirm(
-                                                    'Setujui transfer unit ini?'
-                                                );
-                                            "
-                                        >
-
-                                            <?= csrf_field() ?>
-
-                                            <input
-                                                type="hidden"
-                                                name="action"
-                                                value="approve"
-                                            >
-
-                                            <input
-                                                type="hidden"
-                                                name="transfer_id"
-                                                value="<?= (int) $transfer["id"] ?>"
-                                            >
-
-                                            <button
-                                                type="submit"
-                                                class="action-button approve-button"
-                                            >
-                                                ✓ Setujui
-                                            </button>
-
-                                        </form>
-
-
-                                        <!-- TOLAK -->
-
-                                        <form
-                                            class="action-form"
-                                            action="proses-transfer.php"
-                                            method="POST"
-                                            onsubmit="
-                                                return confirm(
-                                                    'Tolak transfer unit ini?'
-                                                );
-                                            "
-                                        >
-
-                                            <?= csrf_field() ?>
-
-                                            <input
-                                                type="hidden"
-                                                name="action"
-                                                value="reject"
-                                            >
-
-                                            <input
-                                                type="hidden"
-                                                name="transfer_id"
-                                                value="<?= (int) $transfer["id"] ?>"
-                                            >
-
-                                            <button
-                                                type="submit"
-                                                class="action-button reject-button"
-                                            >
-                                                × Tolak
-                                            </button>
-
-                                        </form>
-
-                                    </div>
-
-                                <?php endif; ?>
 
                             </td>
 
+                            <td>
+                                <?= htmlspecialchars($transfer['requested_at']) ?>
+                            </td>
 
-                            <!-- WAKTU -->
+                            <td>
 
-                            <td class="time">
+                                <div class="action">
 
-                                <?php
+                                    <?php if ($transfer['status'] === 'PENDING'): ?>
 
-                                $requestedTimestamp = strtotime(
-                                    $transfer["requested_at"]
-                                );
+                                        <a
+                                            href="scan-transfer.php?id=<?= (int) $transfer['id'] ?>"
+                                            class="action-scan"
+                                        >
+                                            Scan QR
+                                        </a>
 
-                                ?>
+                                    <?php elseif ($transfer['status'] === 'SIAP_DI_KONFIRMASI'): ?>
 
-                                <span class="date">
+                                        <span style="color:#1e40af;font-size:13px;">
+                                            Menunggu konfirmasi
+                                        </span>
 
-                                    <?= htmlspecialchars(
-                                        date(
-                                            "d M Y",
-                                            $requestedTimestamp
-                                        ),
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
+                                    <?php elseif ($transfer['status'] === 'COMPLETED'): ?>
 
-                                </span>
+                                        <span style="color:#166534;font-size:13px;">
+                                            Transfer selesai
+                                        </span>
 
-                                <span class="clock">
+                                    <?php endif; ?>
 
-                                    <?= htmlspecialchars(
-                                        date(
-                                            "H:i",
-                                            $requestedTimestamp
-                                        ),
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
-
-                                    WIB
-
-                                </span>
+                                </div>
 
                             </td>
 
@@ -1525,43 +983,20 @@ $incoming_transfers = $stmt->fetchAll();
     </div>
 
 
-    <!-- =====================================================
+    <!-- ==========================================================
          TRANSFER MASUK
-         ===================================================== -->
+         ========================================================== -->
 
-    <div class="card incoming-card">
+    <div class="card">
 
-        <div class="card-header">
+        <h2>
+            Transfer Masuk
+        </h2>
 
-            <h2>
-                Transfer Masuk
-            </h2>
-
-            <p>
-                Unit dari cabang lain yang sudah disetujui
-                dan siap diterima melalui scan QR.
-            </p>
-
-        </div>
-
-
-        <?php if (count($incoming_transfers) === 0): ?>
+        <?php if (!$incoming_transfers): ?>
 
             <div class="empty">
-
-                <div class="empty-icon">
-                    ↓
-                </div>
-
-                <h3>
-                    Belum ada transfer masuk
-                </h3>
-
-                <p>
-                    Transfer yang sudah disetujui untuk
-                    cabang Anda akan muncul di sini.
-                </p>
-
+                Belum ada transfer masuk.
             </div>
 
         <?php else: ?>
@@ -1579,15 +1014,19 @@ $incoming_transfers = $stmt->fetchAll();
                             </th>
 
                             <th>
-                                Dari
+                                Kategori
                             </th>
 
                             <th>
-                                Ke
+                                Dari Cabang
                             </th>
 
                             <th>
                                 Status
+                            </th>
+
+                            <th>
+                                Dibuat
                             </th>
 
                             <th>
@@ -1600,97 +1039,94 @@ $incoming_transfers = $stmt->fetchAll();
 
                     <tbody>
 
-                    <?php foreach (
-                        $incoming_transfers
-                        as $transfer
-                    ): ?>
+                    <?php foreach ($incoming_transfers as $transfer): ?>
 
                         <tr>
 
-                            <!-- UNIT -->
+                            <td>
+
+                                <strong>
+                                    <?= htmlspecialchars($transfer['kode_unit']) ?>
+                                </strong>
+
+                                <br>
+
+                                <?= htmlspecialchars($transfer['nama_unit']) ?>
+
+                            </td>
+
+                            <td>
+                                <?= htmlspecialchars($transfer['kategori']) ?>
+                            </td>
+
+                            <td>
+                                <?= htmlspecialchars($transfer['from_branch_name']) ?>
+                            </td>
 
                             <td>
 
-                                <span class="unit-code">
-
+                                <span
+                                    class="status <?= status_class($transfer['status']) ?>"
+                                >
                                     <?= htmlspecialchars(
-                                        $transfer["kode_unit"],
-                                        ENT_QUOTES,
-                                        "UTF-8"
+                                        status_label($transfer['status'])
                                     ) ?>
-
                                 </span>
 
-                                <div class="unit-name">
+                            </td>
 
-                                    <?= htmlspecialchars(
-                                        $transfer["nama_unit"],
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
+                            <td>
+                                <?= htmlspecialchars($transfer['requested_at']) ?>
+                            </td>
+
+                            <td>
+
+                                <div class="action">
+
+                                    <?php if ($transfer['status'] === 'SIAP_DI_KONFIRMASI'): ?>
+
+                                        <form
+                                            method="POST"
+                                            onsubmit="return confirm('Yakin ingin mengonfirmasi unit ini? Kepemilikan unit akan berpindah ke cabang Anda.');"
+                                        >
+
+                                            <input
+                                                type="hidden"
+                                                name="csrf_token"
+                                                value="<?= htmlspecialchars(csrf_token()) ?>"
+                                            >
+
+                                            <input
+                                                type="hidden"
+                                                name="transfer_id"
+                                                value="<?= (int) $transfer['id'] ?>"
+                                            >
+
+                                            <button
+                                                type="submit"
+                                                formaction="proses-terima-transfer.php"
+                                                class="btn-success"
+                                            >
+                                                Konfirmasi
+                                            </button>
+
+                                        </form>
+
+                                    <?php elseif ($transfer['status'] === 'PENDING'): ?>
+
+                                        <span style="color:#92400e;font-size:13px;">
+                                            Menunggu scan asal
+                                        </span>
+
+                                    <?php elseif ($transfer['status'] === 'COMPLETED'): ?>
+
+                                        <span style="color:#166534;font-size:13px;">
+                                            Sudah diterima
+                                        </span>
+
+                                    <?php endif; ?>
 
                                 </div>
-
-                            </td>
-
-
-                            <!-- DARI -->
-
-                            <td>
-
-                                <span class="branch">
-
-                                    <?= htmlspecialchars(
-                                        $transfer["dari_cabang"],
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
-
-                                </span>
-
-                            </td>
-
-
-                            <!-- KE -->
-
-                            <td>
-
-                                <span class="branch">
-
-                                    <?= htmlspecialchars(
-                                        $transfer["ke_cabang"],
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
-
-                                </span>
-
-                            </td>
-
-
-                            <!-- STATUS -->
-
-                            <td>
-
-                                <span class="status approved">
-
-                                    ✓ APPROVED
-
-                                </span>
-
-                            </td>
-
-
-                            <!-- AKSI -->
-
-                            <td>
-
-                                <a
-                                    class="scan-button"
-                                    href="scan-transfer.php?transfer_id=<?= (int) $transfer["id"] ?>"
-                                >
-                                    ▣ Scan QR & Terima
-                                </a>
 
                             </td>
 
@@ -1711,5 +1147,4 @@ $incoming_transfers = $stmt->fetchAll();
 </div>
 
 </body>
-
 </html>

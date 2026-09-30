@@ -1,52 +1,24 @@
 <?php
 
-session_start();
-
-/*
-|--------------------------------------------------------------------------
-| Hapus semua data session
-|--------------------------------------------------------------------------
-*/
+require_once "../config/auth.php";
 
 $_SESSION = [];
 
-/*
-|--------------------------------------------------------------------------
-| Hapus cookie session
-|--------------------------------------------------------------------------
-*/
-
 if (ini_get("session.use_cookies")) {
-
     $params = session_get_cookie_params();
 
     setcookie(
         session_name(),
-        "",
-        [
-            "expires" => time() - 42000,
-            "path" => $params["path"],
-            "domain" => $params["domain"],
-            "secure" => $params["secure"],
-            "httponly" => $params["httponly"],
-            "samesite" => "Lax"
-        ]
+        '',
+        time() - 42000,
+        $params["path"],
+        $params["domain"],
+        $params["secure"],
+        $params["httponly"]
     );
 }
 
-/*
-|--------------------------------------------------------------------------
-| Hancurkan session
-|--------------------------------------------------------------------------
-*/
-
 session_destroy();
-
-/*
-|--------------------------------------------------------------------------
-| Redirect ke login
-|--------------------------------------------------------------------------
-*/
 
 header("Location: login.php");
 exit;

@@ -1,298 +1,482 @@
 <?php
 
-require_once "../config/auth.php";
-require_once "../config/database.php";
-require_once "../config/csrf.php";
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../config/auth.php';
+require_once __DIR__ . '/../config/csrf.php';
 
-// ============================================================
-// CACHE CONTROL
-// ============================================================
+require_login();
 
-header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
-header("Pragma: no-cache");
+/*
+|--------------------------------------------------------------------------
+| Hanya POST
+|--------------------------------------------------------------------------
+*/
 
-// ============================================================
-// WAJIB POST
-// ============================================================
-
-if ($_SERVER["REQUEST_METHOD"] !== "POST") {
-    http_response_code(405);
-    header("Allow: POST");
-    die("Method tidak diizinkan.");
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    header("Location: unit-masuk.php");
+    exit;
 }
 
-// ============================================================
-// CEK CSRF
-// ============================================================
 
-verify_csrf();
+/*
+|--------------------------------------------------------------------------
+| CSRF
+|--------------------------------------------------------------------------
+*/
 
-// ============================================================
-// AMBIL DATA
-// ============================================================
+if (!verify_csrf($_POST['csrf_token'] ?? '')) {
 
-$rental_id = $_POST["rental_id"] ?? "";
+    http_response_code(403);
 
-// ============================================================
-// VALIDASI RENTAL ID
-// ============================================================
-
-if (
-    $rental_id === "" ||
-    !ctype_digit((string) $rental_id) ||
-    (int) $rental_id <= 0
-) {
-    http_response_code(400);
-    die("Data rental tidak valid.");
+    die("Permintaan tidak valid.");
 }
 
-$rental_id = (int) $rental_id;
 
-// ============================================================
-// DATA USER LOGIN
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| Ambil data
+|--------------------------------------------------------------------------
+*/
 
-$user_id = (int) $_SESSION["user_id"];
-$branch_id = (int) $_SESSION["branch_id"];
+$itemId = (int) ($_POST['item_id'] ?? 0);
+$action = $_POST['action'] ?? '';
 
-// ============================================================
-// PROSES DATABASE
-// ============================================================
+
+if ($itemId <= 0) {
+
+    $_SESSION['unit_masuk_error'] =
+        'Data unit tidak valid.';
+
+    header("Location: unit-masuk.php");
+
+    exit;
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| Validasi action
+|--------------------------------------------------------------------------
+*/
+
+if (!in_array($action, ['selesai', 'batalkan'], true)) {
+
+    $_SESSION['unit_masuk_error'] =
+        'Tindakan tidak valid.';
+
+    header("Location: unit-masuk.php");
+
+    exit;
+}
+
+
+$branchId = user_branch_id();
+$userId = user_id();
+
 
 try {
 
     $pdo->beginTransaction();
 
-    // ========================================================
-    // CARI RENTAL + UNIT
-    // LOCK ROW
-    // ========================================================
 
-    $stmt = $pdo->prepare(
-        "SELECT
-            rentals.id AS rental_id,
-            rentals.unit_id,
-            rentals.status AS rental_status,
-            units.kode_unit,
-            units.nama_unit,
-            units.owner_branch_id,
-            units.status AS unit_status
-         FROM rentals
-         INNER JOIN units
-            ON rentals.unit_id = units.id
-         WHERE rentals.id = ?
-         LIMIT 1
-         FOR UPDATE"
-    );
+    /*
+    |--------------------------------------------------------------------------
+    | Ambil rental item + unit + rental
+    |--------------------------------------------------------------------------
+    */
 
-    $stmt->execute([
-        $rental_id
-    ]);
+    $stmt = $pdo->prepare("
+        SELECT
+            ri.id AS rental_item_id,
+            ri.rental_id,
+            ri.unit_id,
+            ri.status AS item_status,
 
-    $rental = $stmt->fetch();
+            r.branch_id,
+            r.renter_code,
 
-    // ========================================================
-    // RENTAL TIDAK DITEMUKAN
-    // ========================================================
+            u.kode_unit,
+            u.nama_unit,
+            u.status AS unit_status,
+            u.owner_branch_id
 
-    if (!$rental) {
+        FROM rental_items ri
 
-        $pdo->rollBack();
+        INNER JOIN rentals r
+            ON r.id = ri.rental_id
 
-        http_response_code(404);
-        die("Data rental tidak ditemukan.");
-    }
+        INNER JOIN units u
+            ON u.id = ri.unit_id
 
-    // ========================================================
-    // PASTIKAN UNIT MILIK CABANG USER
-    // ========================================================
+        WHERE ri.id = ?
 
-    if (
-        (int) $rental["owner_branch_id"] !== $branch_id
-    ) {
-
-        $pdo->rollBack();
-
-        http_response_code(403);
-        die("Unit ini bukan milik cabang Anda.");
-    }
-
-    // ========================================================
-    // PASTIKAN RENTAL MASIH AKTIF
-    // ========================================================
-
-    if (
-        $rental["rental_status"] !== "AKTIF"
-    ) {
-
-        $pdo->rollBack();
-
-        http_response_code(409);
-        die("Rental ini sudah selesai.");
-    }
-
-    // ========================================================
-    // PASTIKAN UNIT MASIH DISEWAKAN
-    // ========================================================
-
-    if (
-        $rental["unit_status"] !== "DISEWAKAN"
-    ) {
-
-        $pdo->rollBack();
-
-        http_response_code(409);
-        die("Status unit tidak sesuai.");
-    }
-
-    // ========================================================
-    // UPDATE RENTAL
-    // ========================================================
-
-    $stmt = $pdo->prepare(
-        "UPDATE rentals
-         SET
-            checkin_by = ?,
-            checkin_at = NOW(),
-            status = 'SELESAI'
-         WHERE id = ?
-           AND status = 'AKTIF'"
-    );
+        FOR UPDATE
+    ");
 
     $stmt->execute([
-        $user_id,
-        $rental_id
+        $itemId
     ]);
 
-    // Pastikan tepat satu rental diperbarui
-    if ($stmt->rowCount() !== 1) {
-        throw new RuntimeException(
-            "Gagal memperbarui status rental."
+    $item = $stmt->fetch();
+
+
+    if (!$item) {
+
+        throw new Exception(
+            'Data unit tidak ditemukan.'
         );
     }
 
-    // ========================================================
-    // UPDATE STATUS UNIT
-    // ========================================================
 
-    $stmt = $pdo->prepare(
-        "UPDATE units
-         SET status = 'TERSEDIA'
-         WHERE id = ?
-           AND owner_branch_id = ?
-           AND status = 'DISEWAKAN'"
-    );
+    /*
+    |--------------------------------------------------------------------------
+    | Pastikan transaksi milik cabang sendiri
+    |--------------------------------------------------------------------------
+    */
 
-    $stmt->execute([
-        (int) $rental["unit_id"],
-        $branch_id
-    ]);
+    if ((int) $item['branch_id'] !== (int) $branchId) {
 
-    // Pastikan tepat satu unit diperbarui
-    if ($stmt->rowCount() !== 1) {
-        throw new RuntimeException(
-            "Gagal memperbarui status unit."
+        throw new Exception(
+            'Anda tidak memiliki akses ke transaksi ini.'
         );
     }
 
-    // ========================================================
-    // SIMPAN HISTORY
-    // ========================================================
 
-    $description =
-        "Unit " .
-        $rental["kode_unit"] .
-        " telah dikonfirmasi masuk kembali.";
+    /*
+    |--------------------------------------------------------------------------
+    | ACTION: SELESAI
+    |--------------------------------------------------------------------------
+    */
 
-    $stmt = $pdo->prepare(
-        "INSERT INTO unit_history
-        (
-            unit_id,
-            performed_by,
-            branch_id,
-            action,
-            description
-        )
-        VALUES
-        (
-            ?,
-            ?,
-            ?,
-            'UNIT_MASUK',
-            ?
-        )"
-    );
+    if ($action === 'selesai') {
 
-    $stmt->execute([
-        (int) $rental["unit_id"],
-        $user_id,
-        $branch_id,
-        $description
-    ]);
 
-    // ========================================================
-    // COMMIT
-    // ========================================================
+        /*
+        |--------------------------------------------------------------------------
+        | Harus masih DISEWAKAN
+        |--------------------------------------------------------------------------
+        */
 
-    $pdo->commit();
+        if ($item['item_status'] !== 'DISEWAKAN') {
 
-    // ========================================================
-    // REDIRECT
-    // ========================================================
+            throw new Exception(
+                'Unit ini sudah tidak berstatus disewa.'
+            );
+        }
 
-    header(
-        "Location: unit-masuk.php?success=1"
-    );
 
-    exit;
+        /*
+        |--------------------------------------------------------------------------
+        | Kunci unit
+        |--------------------------------------------------------------------------
+        */
 
-} catch (PDOException $e) {
+        $stmtUnit = $pdo->prepare("
+            SELECT
+                id,
+                kode_unit,
+                status,
+                owner_branch_id
+            FROM units
+            WHERE id = ?
+            FOR UPDATE
+        ");
 
-    // ========================================================
-    // ROLLBACK
-    // ========================================================
+        $stmtUnit->execute([
+            $item['unit_id']
+        ]);
 
-    if ($pdo->inTransaction()) {
-        $pdo->rollBack();
+        $unit = $stmtUnit->fetch();
+
+
+        if (!$unit) {
+
+            throw new Exception(
+                'Unit tidak ditemukan.'
+            );
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Pastikan unit milik cabang
+        |--------------------------------------------------------------------------
+        */
+
+        if ((int) $unit['owner_branch_id'] !== (int) $branchId) {
+
+            throw new Exception(
+                'Unit bukan milik cabang Anda.'
+            );
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Update rental item
+        |--------------------------------------------------------------------------
+        */
+
+        $stmt = $pdo->prepare("
+            UPDATE rental_items
+            SET
+                status = 'SELESAI',
+                returned_by = ?,
+                returned_at = NOW()
+            WHERE id = ?
+        ");
+
+        $stmt->execute([
+            $userId,
+            $itemId
+        ]);
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Update unit
+        |--------------------------------------------------------------------------
+        */
+
+        $stmt = $pdo->prepare("
+            UPDATE units
+            SET
+                status = 'TERSEDIA',
+                updated_at = NOW()
+            WHERE id = ?
+        ");
+
+        $stmt->execute([
+            $item['unit_id']
+        ]);
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Riwayat
+        |--------------------------------------------------------------------------
+        */
+
+        $description =
+            'Unit ' .
+            $unit['kode_unit'] .
+            ' kembali dari penyewa ' .
+            $item['renter_code'] .
+            '. Transaksi #' .
+            $item['rental_id'];
+
+
+        $stmt = $pdo->prepare("
+            INSERT INTO unit_history (
+                unit_id,
+                performed_by,
+                branch_id,
+                action,
+                description,
+                created_at
+            )
+            VALUES (?, ?, ?, 'MASUK', ?, NOW())
+        ");
+
+        $stmt->execute([
+            $item['unit_id'],
+            $userId,
+            $branchId,
+            $description
+        ]);
+
+
+        $pdo->commit();
+
+
+        $_SESSION['unit_masuk_success'] =
+            'Unit ' .
+            $unit['kode_unit'] .
+            ' berhasil ditandai sebagai selesai.';
+
+
+        header("Location: unit-masuk.php");
+
+        exit;
     }
 
-    // ========================================================
-    // LOG ERROR DATABASE
-    // ========================================================
 
-    error_log(
-        "proses-masuk.php PDO error: " .
-        $e->getMessage()
-    );
+    /*
+    |--------------------------------------------------------------------------
+    | ACTION: BATALKAN
+    |--------------------------------------------------------------------------
+    */
 
-    http_response_code(500);
+    if ($action === 'batalkan') {
 
-    die(
-        "Terjadi kesalahan saat memproses unit masuk."
-    );
+
+        /*
+        |--------------------------------------------------------------------------
+        | Harus sudah SELESAI
+        |--------------------------------------------------------------------------
+        */
+
+        if ($item['item_status'] !== 'SELESAI') {
+
+            throw new Exception(
+                'Unit ini belum berstatus selesai.'
+            );
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Kunci unit
+        |--------------------------------------------------------------------------
+        */
+
+        $stmtUnit = $pdo->prepare("
+            SELECT
+                id,
+                kode_unit,
+                status,
+                owner_branch_id
+            FROM units
+            WHERE id = ?
+            FOR UPDATE
+        ");
+
+        $stmtUnit->execute([
+            $item['unit_id']
+        ]);
+
+        $unit = $stmtUnit->fetch();
+
+
+        if (!$unit) {
+
+            throw new Exception(
+                'Unit tidak ditemukan.'
+            );
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Pastikan unit milik cabang sendiri
+        |--------------------------------------------------------------------------
+        */
+
+        if ((int) $unit['owner_branch_id'] !== (int) $branchId) {
+
+            throw new Exception(
+                'Unit bukan milik cabang Anda.'
+            );
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Kembalikan rental item ke DISEWAKAN
+        |--------------------------------------------------------------------------
+        */
+
+        $stmt = $pdo->prepare("
+            UPDATE rental_items
+            SET
+                status = 'DISEWAKAN',
+                returned_by = NULL,
+                returned_at = NULL
+            WHERE id = ?
+        ");
+
+        $stmt->execute([
+            $itemId
+        ]);
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Kembalikan status unit
+        |--------------------------------------------------------------------------
+        */
+
+        $stmt = $pdo->prepare("
+            UPDATE units
+            SET
+                status = 'DISEWAKAN',
+                updated_at = NOW()
+            WHERE id = ?
+        ");
+
+        $stmt->execute([
+            $item['unit_id']
+        ]);
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Riwayat
+        |--------------------------------------------------------------------------
+        */
+
+        $description =
+            'Status masuk unit ' .
+            $unit['kode_unit'] .
+            ' dibatalkan. Unit dikembalikan menjadi DISEWAKAN. ' .
+            'Transaksi #' .
+            $item['rental_id'];
+
+
+        $stmt = $pdo->prepare("
+            INSERT INTO unit_history (
+                unit_id,
+                performed_by,
+                branch_id,
+                action,
+                description,
+                created_at
+            )
+            VALUES (?, ?, ?, 'BATAL_MASUK', ?, NOW())
+        ");
+
+        $stmt->execute([
+            $item['unit_id'],
+            $userId,
+            $branchId,
+            $description
+        ]);
+
+
+        $pdo->commit();
+
+
+        $_SESSION['unit_masuk_success'] =
+            'Status unit ' .
+            $unit['kode_unit'] .
+            ' berhasil dibatalkan.';
+
+
+        header("Location: unit-masuk.php");
+
+        exit;
+    }
+
 
 } catch (Throwable $e) {
 
-    // ========================================================
-    // ROLLBACK
-    // ========================================================
+
+    /*
+    |--------------------------------------------------------------------------
+    | Rollback
+    |--------------------------------------------------------------------------
+    */
 
     if ($pdo->inTransaction()) {
         $pdo->rollBack();
     }
 
-    // ========================================================
-    // LOG ERROR
-    // ========================================================
 
-    error_log(
-        "proses-masuk.php error: " .
-        $e->getMessage()
-    );
+    $_SESSION['unit_masuk_error'] =
+        $e->getMessage();
 
-    http_response_code(500);
 
-    die(
-        "Terjadi kesalahan saat memproses unit masuk."
-    );
+    header("Location: unit-masuk.php");
+
+    exit;
 }

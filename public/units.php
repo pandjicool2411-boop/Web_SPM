@@ -1,275 +1,308 @@
 <?php
 
-require_once "../config/database.php";
-require_once "../config/auth.php";
-require_once "../config/csrf.php";
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../config/auth.php';
+require_once __DIR__ . '/../config/csrf.php';
 
-verify_csrf();
+require_login();
 
-$branch_id = (int) $_SESSION["branch_id"];
-$user_id = (int) $_SESSION["user_id"];
+$branchId = user_branch_id();
+$csrf = csrf_token();
 
-$message = "";
-$error = "";
+$error = '';
+$success = '';
+
+/*
+|--------------------------------------------------------------------------
+| Notifikasi
+|--------------------------------------------------------------------------
+*/
+
+if (isset($_GET['created'])) {
+    $success = 'Unit berhasil ditambahkan.';
+}
+
+if (isset($_GET['updated'])) {
+    $success = 'Data unit berhasil diperbarui.';
+}
 
 
-// ==========================================================================
-// TAMBAH UNIT
-// ==========================================================================
+/*
+|--------------------------------------------------------------------------
+| Tambah Unit
+|--------------------------------------------------------------------------
+*/
 
-if ($_SERVER["REQUEST_METHOD"] === "POST") {
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
-    $action = $_POST["action"] ?? "";
+    $action = $_POST['action'] ?? '';
 
-    if ($action === "tambah") {
+    if ($action === 'tambah_unit') {
 
-        $kode_unit = trim($_POST["kode_unit"] ?? "");
-        $nama_unit = trim($_POST["nama_unit"] ?? "");
-        $kategori = trim($_POST["kategori"] ?? "");
+        if (!verify_csrf($_POST['csrf_token'] ?? '')) {
 
-
-        // ------------------------------------------------------------------
-        // VALIDASI
-        // ------------------------------------------------------------------
-
-        if (
-            $kode_unit === "" ||
-            $nama_unit === "" ||
-            $kategori === ""
-        ) {
-
-            $error = "Semua data unit wajib diisi.";
-
-        } elseif (mb_strlen($kode_unit) > 50) {
-
-            $error = "Kode unit maksimal 50 karakter.";
-
-        } elseif (mb_strlen($nama_unit) > 100) {
-
-            $error = "Nama unit maksimal 100 karakter.";
-
-        } elseif (mb_strlen($kategori) > 100) {
-
-            $error = "Kategori maksimal 100 karakter.";
+            $error = 'Permintaan tidak valid. Silakan coba lagi.';
 
         } else {
 
-            try {
+            $kodeUnit = trim($_POST['kode_unit'] ?? '');
+            $namaUnit = trim($_POST['nama_unit'] ?? '');
+            $kategori = trim($_POST['kategori'] ?? '');
+            $jumlah = (int) ($_POST['jumlah'] ?? 0);
 
-                // ----------------------------------------------------------
-                // Pastikan branch dari session masih valid
-                // ----------------------------------------------------------
 
-                $check_branch = $pdo->prepare(
-                    "SELECT id
-                     FROM branches
-                     WHERE id = ?
-                     LIMIT 1"
-                );
+            /*
+            |--------------------------------------------------------------------------
+            | Validasi
+            |--------------------------------------------------------------------------
+            */
 
-                $check_branch->execute([$branch_id]);
+            if ($kodeUnit === '') {
 
-                if (!$check_branch->fetch()) {
+                $error = 'Kode unit wajib diisi.';
 
-                    $error = "Cabang akun tidak valid.";
+            } elseif ($namaUnit === '') {
 
-                } else {
+                $error = 'Nama unit wajib diisi.';
 
-                    // ------------------------------------------------------
-                    // Cek kode unit
-                    // ------------------------------------------------------
+            } elseif ($kategori === '') {
 
-                    $check_unit = $pdo->prepare(
-                        "SELECT id
-                         FROM units
-                         WHERE kode_unit = ?
-                         LIMIT 1"
-                    );
+                $error = 'Kategori unit wajib diisi.';
 
-                    $check_unit->execute([$kode_unit]);
+            } elseif ($jumlah < 1) {
 
-                    if ($check_unit->fetch()) {
+                $error = 'Jumlah unit minimal 1.';
 
-                        $error = "Kode unit sudah digunakan.";
+            } else {
+
+                try {
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Cek kode unit
+                    |--------------------------------------------------------------------------
+                    */
+
+                    $stmt = $pdo->prepare("
+                        SELECT id
+                        FROM units
+                        WHERE kode_unit = ?
+                        LIMIT 1
+                    ");
+
+                    $stmt->execute([
+                        $kodeUnit
+                    ]);
+
+                    if ($stmt->fetch()) {
+
+                        $error =
+                            'Kode unit "' .
+                            htmlspecialchars($kodeUnit) .
+                            '" sudah digunakan.';
 
                     } else {
 
-                        // --------------------------------------------------
-                        // Generate QR token permanen
-                        // --------------------------------------------------
-
-                        $qr_token = bin2hex(
-                            random_bytes(16)
-                        );
-
-
-                        // --------------------------------------------------
-                        // TRANSAKSI DATABASE
-                        // --------------------------------------------------
+                        /*
+                        |--------------------------------------------------------------------------
+                        | Simpan Unit
+                        |--------------------------------------------------------------------------
+                        |
+                        | CATATAN:
+                        | jumlah TIDAK membuat banyak baris.
+                        |
+                        | Contoh:
+                        |
+                        | kode_unit = A10
+                        | nama_unit = HT
+                        | jumlah = 10
+                        |
+                        | Tetap hanya 1 record unit.
+                        |
+                        */
 
                         $pdo->beginTransaction();
 
-                        try {
 
-                            // ------------------------------------------------
-                            // Simpan unit
-                            //
-                            // owner_branch_id selalu berasal dari session.
-                            // ------------------------------------------------
+                        $stmt = $pdo->prepare("
+                            INSERT INTO units (
+                                kode_unit,
+                                nama_unit,
+                                kategori,
+                                jumlah,
+                                owner_branch_id,
+                                status,
+                                created_at,
+                                updated_at
+                            )
+                            VALUES (
+                                ?,
+                                ?,
+                                ?,
+                                ?,
+                                ?,
+                                'TERSEDIA',
+                                NOW(),
+                                NOW()
+                            )
+                        ");
 
-                            $stmt = $pdo->prepare(
-                                "INSERT INTO units
-                                (
-                                    kode_unit,
-                                    nama_unit,
-                                    kategori,
-                                    qr_token,
-                                    owner_branch_id,
-                                    status
-                                )
-                                VALUES (?, ?, ?, ?, ?, 'TERSEDIA')"
-                            );
-
-                            $stmt->execute([
-                                $kode_unit,
-                                $nama_unit,
-                                $kategori,
-                                $qr_token,
-                                $branch_id
-                            ]);
-
-
-                            // ------------------------------------------------
-                            // Ambil ID unit
-                            // ------------------------------------------------
-
-                            $unit_id = (int) $pdo->lastInsertId();
+                        $stmt->execute([
+                            $kodeUnit,
+                            $namaUnit,
+                            $kategori,
+                            $jumlah,
+                            $branchId
+                        ]);
 
 
-                            // ------------------------------------------------
-                            // Simpan history
-                            // ------------------------------------------------
-
-                            $history = $pdo->prepare(
-                                "INSERT INTO unit_history
-                                (
-                                    unit_id,
-                                    performed_by,
-                                    branch_id,
-                                    action,
-                                    description
-                                )
-                                VALUES (?, ?, ?, ?, ?)"
-                            );
-
-                            $history->execute([
-                                $unit_id,
-                                $user_id,
-                                $branch_id,
-                                "UNIT_DIDAFTARKAN",
-                                "Unit baru didaftarkan ke cabang."
-                            ]);
+                        $unitId =
+                            (int) $pdo->lastInsertId();
 
 
-                            // ------------------------------------------------
-                            // Commit
-                            // ------------------------------------------------
+                        /*
+                        |--------------------------------------------------------------------------
+                        | Catat History
+                        |--------------------------------------------------------------------------
+                        */
 
-                            $pdo->commit();
+                        $stmtHistory = $pdo->prepare("
+                            INSERT INTO unit_history (
+                                unit_id,
+                                performed_by,
+                                branch_id,
+                                action,
+                                description,
+                                created_at
+                            )
+                            VALUES (
+                                ?,
+                                ?,
+                                ?,
+                                'TAMBAH_UNIT',
+                                ?,
+                                NOW()
+                            )
+                        ");
 
-                            $message = "Unit berhasil ditambahkan.";
+                        $description =
+                            'Menambahkan unit ' .
+                            $kodeUnit .
+                            ' - ' .
+                            $namaUnit .
+                            ' dengan jumlah ' .
+                            $jumlah;
 
-                        } catch (PDOException $e) {
 
-                            if ($pdo->inTransaction()) {
-                                $pdo->rollBack();
-                            }
+                        $stmtHistory->execute([
+                            $unitId,
+                            user_id(),
+                            $branchId,
+                            $description
+                        ]);
 
-                            error_log(
-                                "Gagal menambahkan unit: " .
-                                $e->getMessage()
-                            );
 
-                            $error =
-                                "Unit gagal ditambahkan. Silakan coba lagi.";
-                        }
+                        $pdo->commit();
+
+
+                        header(
+                            "Location: units.php?created=1"
+                        );
+
+                        exit;
                     }
+
+                } catch (PDOException $e) {
+
+                    if ($pdo->inTransaction()) {
+                        $pdo->rollBack();
+                    }
+
+                    $error =
+                        'Unit gagal ditambahkan. Silakan coba lagi.';
                 }
-
-            } catch (PDOException $e) {
-
-                error_log(
-                    "Gagal memproses penambahan unit: " .
-                    $e->getMessage()
-                );
-
-                $error =
-                    "Terjadi kesalahan saat memproses unit.";
             }
         }
     }
 }
 
 
-// ==========================================================================
-// AMBIL SEMUA UNIT
-//
-// Semua cabang boleh melihat unit.
-// Edit hanya untuk owner_branch_id yang sama dengan branch user.
-// ==========================================================================
+/*
+|--------------------------------------------------------------------------
+| Ambil Semua Unit
+|--------------------------------------------------------------------------
+*/
+
+$units = [];
 
 try {
 
-    $stmt = $pdo->prepare(
-        "SELECT
-            units.id,
-            units.kode_unit,
-            units.nama_unit,
-            units.kategori,
-            units.qr_token,
-            units.owner_branch_id,
-            units.status,
-            units.created_at,
-            units.updated_at,
-            branches.nama_cabang
-        FROM units
-        INNER JOIN branches
-            ON units.owner_branch_id = branches.id
-        ORDER BY units.id DESC"
-    );
+    $stmt = $pdo->query("
+        SELECT
+            u.id,
+            u.kode_unit,
+            u.nama_unit,
+            u.kategori,
+            u.jumlah,
+            u.status,
+            u.owner_branch_id,
+            b.nama_cabang
 
-    $stmt->execute();
+        FROM units u
+
+        INNER JOIN branches b
+            ON b.id = u.owner_branch_id
+
+        ORDER BY
+            b.id ASC,
+            u.kategori ASC,
+            u.kode_unit ASC
+    ");
 
     $units = $stmt->fetchAll();
 
 } catch (PDOException $e) {
 
-    error_log(
-        "Gagal mengambil daftar unit: " .
-        $e->getMessage()
-    );
-
-    $units = [];
-
-    if ($message === "") {
-
-        $error =
-            "Daftar unit tidak dapat dimuat.";
-    }
+    $error =
+        'Data unit gagal dimuat.';
 }
 
 
-// ==========================================================================
-// HELPER OUTPUT
-// ==========================================================================
+/*
+|--------------------------------------------------------------------------
+| Grouping
+|--------------------------------------------------------------------------
+*/
 
-function e($value)
-{
-    return htmlspecialchars(
-        (string) $value,
-        ENT_QUOTES,
-        "UTF-8"
-    );
+$groupedUnits = [];
+
+foreach ($units as $unit) {
+
+    $branchName =
+        $unit['nama_cabang'];
+
+    $category =
+        $unit['kategori'];
+
+
+    if (!isset($groupedUnits[$branchName])) {
+
+        $groupedUnits[$branchName] = [];
+
+    }
+
+
+    if (!isset(
+        $groupedUnits[$branchName][$category]
+    )) {
+
+        $groupedUnits[$branchName][$category] = [];
+
+    }
+
+
+    $groupedUnits[$branchName][$category][] =
+        $unit;
 }
 
 ?>
@@ -286,9 +319,7 @@ function e($value)
         content="width=device-width, initial-scale=1.0"
     >
 
-    <title>
-        Daftar Unit - Sistem Scan Unit
-    </title>
+    <title>Kelola Unit - Sistem Scan Unit</title>
 
 
     <style>
@@ -297,660 +328,424 @@ function e($value)
             box-sizing: border-box;
         }
 
+
         body {
             margin: 0;
-            font-family:
-                Arial,
-                Helvetica,
-                sans-serif;
+            font-family: Arial, Helvetica, sans-serif;
             background: #f4f6f8;
-            color: #172033;
+            color: #1f2937;
         }
 
-        button,
-        input {
-            font-family: inherit;
-        }
 
         .container {
-            width: 100%;
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 24px;
+            width: min(1100px, 94%);
+            margin: 30px auto;
         }
 
 
-        /* =========================================================
-           TOP BAR
-        ========================================================= */
+        /*
+        |--------------------------------------------------------------------------
+        | Header
+        |--------------------------------------------------------------------------
+        */
 
-        .top {
+        .topbar {
             display: flex;
-            align-items: center;
             justify-content: space-between;
-            margin-bottom: 18px;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+            margin-bottom: 22px;
         }
+
+
+        .title h1 {
+            margin: 0;
+            font-size: 26px;
+        }
+
+
+        .title p {
+            margin: 6px 0 0;
+            color: #6b7280;
+            font-size: 14px;
+        }
+
 
         .back {
-            display: inline-flex;
-            align-items: center;
-            gap: 7px;
-            color: #2563eb;
             text-decoration: none;
+            background: #e5e7eb;
+            color: #111827;
+            padding: 10px 15px;
+            border-radius: 8px;
             font-size: 14px;
-            font-weight: bold;
         }
+
 
         .back:hover {
-            color: #1d4ed8;
+            background: #d1d5db;
         }
 
 
-        /* =========================================================
-           PAGE HEADER
-        ========================================================= */
+        /*
+        |--------------------------------------------------------------------------
+        | Card
+        |--------------------------------------------------------------------------
+        */
 
-        .page-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 20px;
-
+        .card {
             background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 18px;
-
-            padding: 24px;
-            margin-bottom: 20px;
-
-            box-shadow:
-                0 4px 16px rgba(15, 23, 42, 0.04);
-        }
-
-        .page-header-left {
-            min-width: 0;
-        }
-
-        .eyebrow {
-            margin: 0 0 6px;
-
-            color: #2563eb;
-
-            font-size: 12px;
-            font-weight: bold;
-            letter-spacing: 0.08em;
-        }
-
-        .page-header h1 {
-            margin: 0;
-
-            font-size: 28px;
-            line-height: 1.25;
-            letter-spacing: -0.4px;
-        }
-
-        .page-description {
-            margin: 7px 0 0;
-
-            color: #64748b;
-
-            font-size: 14px;
-            line-height: 1.5;
-        }
-
-        .branch-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-
-            padding: 10px 14px;
-
-            background: #eff6ff;
-            border: 1px solid #dbeafe;
-            border-radius: 10px;
-
-            color: #1d4ed8;
-
-            font-size: 13px;
-            font-weight: bold;
-
-            white-space: nowrap;
+            border-radius: 14px;
+            padding: 22px;
+            margin-bottom: 22px;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.05);
         }
 
 
-        /* =========================================================
-           ALERT
-        ========================================================= */
+        .card h2 {
+            margin-top: 0;
+            font-size: 19px;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Alert
+        |--------------------------------------------------------------------------
+        */
 
         .alert {
-            display: flex;
-            align-items: flex-start;
-            gap: 10px;
-
             padding: 13px 15px;
-
-            border-radius: 11px;
-
+            border-radius: 9px;
             margin-bottom: 18px;
-
             font-size: 14px;
-            line-height: 1.5;
         }
 
-        .alert.success {
-            background: #ecfdf5;
-            border: 1px solid #bbf7d0;
+
+        .alert-success {
+            background: #dcfce7;
             color: #166534;
         }
 
-        .alert.error {
-            background: #fef2f2;
-            border: 1px solid #fecaca;
+
+        .alert-error {
+            background: #fee2e2;
             color: #991b1b;
         }
 
 
-        /* =========================================================
-           CARD
-        ========================================================= */
-
-        .card {
-            background: #ffffff;
-
-            border: 1px solid #e5e7eb;
-            border-radius: 16px;
-
-            padding: 22px;
-            margin-bottom: 20px;
-
-            box-shadow:
-                0 3px 12px rgba(15, 23, 42, 0.035);
-        }
-
-        .card-header {
-            display: flex;
-            align-items: flex-start;
-            justify-content: space-between;
-            gap: 15px;
-
-            margin-bottom: 20px;
-        }
-
-        .card-title {
-            margin: 0;
-
-            font-size: 18px;
-            line-height: 1.35;
-        }
-
-        .card-description {
-            margin: 5px 0 0;
-
-            color: #64748b;
-
-            font-size: 13px;
-            line-height: 1.5;
-        }
-
-        .unit-count {
-            display: inline-flex;
-            align-items: center;
-
-            padding: 7px 11px;
-
-            background: #f8fafc;
-            border: 1px solid #e5e7eb;
-            border-radius: 9px;
-
-            color: #475569;
-
-            font-size: 12px;
-            font-weight: bold;
-
-            white-space: nowrap;
-        }
-
-
-        /* =========================================================
-           FORM
-        ========================================================= */
+        /*
+        |--------------------------------------------------------------------------
+        | Form
+        |--------------------------------------------------------------------------
+        */
 
         .form-grid {
             display: grid;
             grid-template-columns:
-                repeat(3, 1fr);
-            gap: 15px;
+                repeat(2, minmax(0, 1fr));
+            gap: 14px;
         }
+
 
         .form-group {
             display: flex;
             flex-direction: column;
+            gap: 6px;
         }
 
+
+        .form-group.full {
+            grid-column: 1 / -1;
+        }
+
+
         label {
-            margin-bottom: 7px;
-
-            color: #334155;
-
             font-size: 13px;
             font-weight: bold;
         }
 
-        input {
+
+        input,
+        select {
             width: 100%;
-
-            padding: 12px 13px;
-
-            background: #ffffff;
-
-            border: 1px solid #cbd5e1;
-            border-radius: 10px;
-
-            color: #172033;
-
+            padding: 11px 13px;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
             font-size: 14px;
-
             outline: none;
-
-            transition:
-                border-color 0.2s,
-                box-shadow 0.2s;
         }
 
-        input::placeholder {
-            color: #94a3b8;
-        }
 
-        input:focus {
+        input:focus,
+        select:focus {
             border-color: #2563eb;
-
-            box-shadow:
-                0 0 0 3px rgba(
-                    37,
-                    99,
-                    235,
-                    0.10
-                );
         }
 
-        .form-button {
-            margin-top: 17px;
+
+        .help {
+            color: #6b7280;
+            font-size: 12px;
+            line-height: 1.5;
         }
 
-        button {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 7px;
 
-            padding: 11px 17px;
+        /*
+        |--------------------------------------------------------------------------
+        | Buttons
+        |--------------------------------------------------------------------------
+        */
 
+        .button-row {
+            display: flex;
+            gap: 9px;
+            flex-wrap: wrap;
+            margin-top: 16px;
+        }
+
+
+        .btn {
+            border: none;
+            text-decoration: none;
+            cursor: pointer;
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-size: 13px;
+            display: inline-block;
+        }
+
+
+        .btn-primary {
             background: #2563eb;
             color: #ffffff;
-
-            border: none;
-            border-radius: 10px;
-
-            font-size: 14px;
-            font-weight: bold;
-
-            cursor: pointer;
-
-            transition:
-                background 0.2s,
-                transform 0.2s;
         }
 
-        button:hover {
+
+        .btn-primary:hover {
             background: #1d4ed8;
         }
 
-        button:active {
-            transform: translateY(1px);
+
+        .btn-secondary {
+            background: #e5e7eb;
+            color: #111827;
         }
 
 
-        /* =========================================================
-           TABLE
-        ========================================================= */
-
-        .table-wrapper {
-            overflow-x: auto;
-
-            border:
-                1px solid #e5e7eb;
-
-            border-radius: 12px;
+        .btn-secondary:hover {
+            background: #d1d5db;
         }
 
-        table {
-            width: 100%;
 
-            min-width: 900px;
-
-            border-collapse: collapse;
+        .btn-green {
+            background: #16a34a;
+            color: #ffffff;
         }
 
-        th,
-        td {
-            padding: 13px 14px;
 
-            border-bottom:
-                1px solid #e5e7eb;
-
-            text-align: left;
-            vertical-align: middle;
+        .btn-green:hover {
+            background: #15803d;
         }
 
-        th {
-            background: #f8fafc;
 
-            color: #475569;
+        /*
+        |--------------------------------------------------------------------------
+        | Branch
+        |--------------------------------------------------------------------------
+        */
 
-            font-size: 12px;
+        .branch-section {
+            margin-bottom: 25px;
+        }
+
+
+        .branch-title {
+            background: #111827;
+            color: white;
+            padding: 13px 16px;
+            border-radius: 10px;
+            font-size: 17px;
             font-weight: bold;
-
-            white-space: nowrap;
+            margin-bottom: 13px;
         }
 
-        td {
-            background: #ffffff;
 
-            color: #334155;
+        /*
+        |--------------------------------------------------------------------------
+        | Category
+        |--------------------------------------------------------------------------
+        */
 
-            font-size: 13px;
+        .category-section {
+            margin-bottom: 18px;
         }
 
-        tbody tr:last-child td {
-            border-bottom: none;
+
+        .category-title {
+            font-size: 15px;
+            font-weight: bold;
+            margin-bottom: 9px;
+            color: #374151;
         }
 
-        tbody tr:hover td {
+
+        /*
+        |--------------------------------------------------------------------------
+        | Unit List
+        |--------------------------------------------------------------------------
+        */
+
+        .unit-list {
+            display: grid;
+            grid-template-columns:
+                repeat(2, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+
+        .unit-item {
             background: #f8fafc;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 15px;
         }
 
 
-        /* =========================================================
-           KODE UNIT
-        ========================================================= */
+        .unit-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 10px;
+        }
+
 
         .unit-code {
-            display: inline-flex;
-
-            padding: 6px 8px;
-
-            background: #f1f5f9;
-
-            border-radius: 7px;
-
-            color: #334155;
-
-            font-family: monospace;
-
-            font-size: 12px;
+            font-size: 17px;
             font-weight: bold;
         }
 
 
-        /* =========================================================
-           STATUS
-        ========================================================= */
+        .unit-name {
+            margin-top: 4px;
+            font-size: 14px;
+            color: #4b5563;
+        }
+
+
+        .unit-info {
+            display: grid;
+            grid-template-columns:
+                repeat(2, 1fr);
+            gap: 8px;
+            margin-top: 13px;
+        }
+
+
+        .info-box {
+            background: #ffffff;
+            border-radius: 7px;
+            padding: 9px;
+        }
+
+
+        .info-label {
+            color: #6b7280;
+            font-size: 11px;
+            margin-bottom: 3px;
+        }
+
+
+        .info-value {
+            font-size: 13px;
+            font-weight: bold;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Status
+        |--------------------------------------------------------------------------
+        */
 
         .status {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-
-            padding: 6px 10px;
-
-            border-radius: 20px;
-
+            display: inline-block;
+            padding: 6px 9px;
+            border-radius: 999px;
             font-size: 11px;
             font-weight: bold;
-
             white-space: nowrap;
         }
 
-        .status::before {
-            content: "";
 
-            width: 6px;
-            height: 6px;
-
-            border-radius: 50%;
-
-            background: currentColor;
-        }
-
-        .tersedia {
-            background: #ecfdf5;
-            color: #15803d;
-        }
-
-        .disewakan {
-            background: #fef2f2;
-            color: #dc2626;
+        .status-tersedia {
+            background: #dcfce7;
+            color: #166534;
         }
 
 
-        /* =========================================================
-           OWNER
-        ========================================================= */
-
-        .owner {
-            display: inline-flex;
-            flex-direction: column;
-            gap: 3px;
-        }
-
-        .owner-name {
-            color: #334155;
-            font-size: 13px;
-        }
-
-        .owner-me {
-            display: inline-flex;
-            width: fit-content;
-
-            padding: 3px 7px;
-
-            background: #eff6ff;
-
-            border-radius: 6px;
-
-            color: #2563eb;
-
-            font-size: 10px;
-            font-weight: bold;
+        .status-disewa {
+            background: #fef3c7;
+            color: #92400e;
         }
 
 
-        /* =========================================================
-           QR TOKEN
-        ========================================================= */
+        /*
+        |--------------------------------------------------------------------------
+        | Empty
+        |--------------------------------------------------------------------------
+        */
 
-        .qr-token {
-            display: block;
-
-            max-width: 180px;
-
-            overflow-wrap: anywhere;
-
-            color: #64748b;
-
-            font-family: monospace;
-            font-size: 10px;
-
-            line-height: 1.4;
-        }
-
-
-        /* =========================================================
-           ACTION
-        ========================================================= */
-
-        .edit-btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-
-            padding: 7px 11px;
-
-            background: #eff6ff;
-            color: #2563eb;
-
-            border: 1px solid #dbeafe;
-            border-radius: 8px;
-
-            text-decoration: none;
-
-            font-size: 12px;
-            font-weight: bold;
-
-            transition: 0.2s;
-        }
-
-        .edit-btn:hover {
-            background: #dbeafe;
-            color: #1d4ed8;
-        }
-
-        .readonly {
-            color: #94a3b8;
-
-            font-size: 11px;
-            font-weight: bold;
-        }
-
-
-        /* =========================================================
-           EMPTY STATE
-        ========================================================= */
-
-        .empty-state {
-            padding: 45px 20px;
-
+        .empty {
             text-align: center;
-        }
-
-        .empty-icon {
-            width: 55px;
-            height: 55px;
-
-            display: flex;
-            align-items: center;
-            justify-content: center;
-
-            margin: 0 auto 12px;
-
-            background: #f1f5f9;
-
-            border-radius: 14px;
-
-            font-size: 25px;
-        }
-
-        .empty-state h3 {
-            margin: 0 0 6px;
-
-            font-size: 16px;
-        }
-
-        .empty-state p {
-            margin: 0;
-
-            color: #64748b;
-
-            font-size: 13px;
+            padding: 40px 15px;
+            color: #6b7280;
         }
 
 
-        /* =========================================================
-           MOBILE
-        ========================================================= */
+        /*
+        |--------------------------------------------------------------------------
+        | Responsive
+        |--------------------------------------------------------------------------
+        */
 
-        @media (max-width: 850px) {
+        @media (max-width: 750px) {
 
             .container {
-                padding: 16px;
+                margin: 20px auto;
             }
 
-            .page-header {
-                align-items: flex-start;
-                flex-direction: column;
-            }
-
-            .branch-badge {
-                white-space: normal;
-            }
 
             .form-grid {
                 grid-template-columns: 1fr;
             }
 
-        }
 
-
-        @media (max-width: 600px) {
-
-            .container {
-                padding: 12px;
+            .form-group.full {
+                grid-column: auto;
             }
 
-            .top {
-                margin-bottom: 14px;
+
+            .unit-list {
+                grid-template-columns: 1fr;
             }
 
-            .back {
-                font-size: 13px;
+
+            .title h1 {
+                font-size: 23px;
             }
 
-            .page-header {
-                padding: 20px;
-
-                border-radius: 15px;
-
-                margin-bottom: 15px;
-            }
-
-            .page-header h1 {
-                font-size: 24px;
-            }
-
-            .page-description {
-                font-size: 13px;
-            }
 
             .card {
                 padding: 17px;
-
-                border-radius: 14px;
             }
 
-            .card-header {
-                flex-direction: column;
+        }
 
-                margin-bottom: 17px;
-            }
 
-            .card-title {
-                font-size: 17px;
-            }
+        @media (max-width: 450px) {
 
-            .form-grid {
-                gap: 13px;
-            }
-
-            .form-button {
-                margin-top: 15px;
-            }
-
-            button {
-                width: 100%;
-            }
-
-            .table-wrapper {
-                border-radius: 10px;
+            .unit-info {
+                grid-template-columns: 1fr;
             }
 
         }
@@ -962,143 +757,85 @@ function e($value)
 
 <body>
 
-
 <div class="container">
 
 
-    <!-- =====================================================
-         TOP
-    ====================================================== -->
+    <!-- HEADER -->
 
-    <div class="top">
+    <div class="topbar">
+
+        <div class="title">
+
+            <h1>
+                📦 Kelola Unit
+            </h1>
+
+            <p>
+                Tambahkan dan kelola unit milik cabang Anda.
+            </p>
+
+        </div>
+
 
         <a
             href="dashboard.php"
             class="back"
         >
-            ← Kembali ke Dashboard
+            ← Dashboard
         </a>
 
     </div>
 
 
-    <!-- =====================================================
-         PAGE HEADER
-    ====================================================== -->
+    <!-- ALERT -->
 
-    <div class="page-header">
+    <?php if ($success !== ''): ?>
 
-        <div class="page-header-left">
+        <div class="alert alert-success">
 
-            <p class="eyebrow">
-                MANAJEMEN UNIT
-            </p>
-
-            <h1>
-                Daftar Unit
-            </h1>
-
-            <p class="page-description">
-                Kelola data unit dan lihat status unit
-                dari seluruh cabang.
-            </p>
-
-        </div>
-
-
-        <div class="branch-badge">
-
-            🏢
-
-            Cabang Anda:
-
-            <?= e(
-                $_SESSION["nama_cabang"] ?? ""
-            ) ?>
-
-        </div>
-
-    </div>
-
-
-    <!-- =====================================================
-         ALERT SUCCESS
-    ====================================================== -->
-
-    <?php if ($message !== ""): ?>
-
-        <div class="alert success">
-
-            <span>
-                ✓
-            </span>
-
-            <span>
-                <?= e($message) ?>
-            </span>
+            <?= htmlspecialchars($success) ?>
 
         </div>
 
     <?php endif; ?>
 
 
-    <!-- =====================================================
-         ALERT ERROR
-    ====================================================== -->
+    <?php if ($error !== ''): ?>
 
-    <?php if ($error !== ""): ?>
+        <div class="alert alert-error">
 
-        <div class="alert error">
-
-            <span>
-                !
-            </span>
-
-            <span>
-                <?= e($error) ?>
-            </span>
+            <?= htmlspecialchars($error) ?>
 
         </div>
 
     <?php endif; ?>
 
 
-    <!-- =====================================================
-         TAMBAH UNIT
-    ====================================================== -->
+    <!-- TAMBAH UNIT -->
 
     <div class="card">
 
-        <div class="card-header">
-
-            <div>
-
-                <h2 class="card-title">
-                    Tambah Unit
-                </h2>
-
-                <p class="card-description">
-                    Unit baru akan otomatis terdaftar
-                    sebagai milik cabang Anda.
-                </p>
-
-            </div>
-
-        </div>
+        <h2>
+            Tambah Unit
+        </h2>
 
 
         <form
             method="POST"
-            action=""
+            action="units.php"
         >
 
-            <?= csrf_field() ?>
+            <input
+                type="hidden"
+                name="csrf_token"
+                value="<?= htmlspecialchars($csrf) ?>"
+            >
 
 
             <input
                 type="hidden"
                 name="action"
-                value="tambah"
+                value="tambah_unit"
             >
 
 
@@ -1117,11 +854,17 @@ function e($value)
                         type="text"
                         id="kode_unit"
                         name="kode_unit"
-                        placeholder="Contoh: INF-001"
-                        maxlength="50"
-                        autocomplete="off"
+                        placeholder="Contoh: A1"
+                        maxlength="100"
                         required
                     >
+
+                    <div class="help">
+
+                        Kode harus unik karena digunakan
+                        sebagai identitas QR unit.
+
+                    </div>
 
                 </div>
 
@@ -1138,9 +881,8 @@ function e($value)
                         type="text"
                         id="nama_unit"
                         name="nama_unit"
-                        placeholder="Contoh: Epson EB-X06"
-                        maxlength="100"
-                        autocomplete="off"
+                        placeholder="Contoh: Projector Epson"
+                        maxlength="255"
                         required
                     >
 
@@ -1159,91 +901,74 @@ function e($value)
                         type="text"
                         id="kategori"
                         name="kategori"
-                        placeholder="Contoh: Proyektor"
+                        placeholder="Contoh: Projector"
                         maxlength="100"
-                        autocomplete="off"
                         required
                     >
 
                 </div>
 
 
+                <!-- JUMLAH -->
+
+                <div class="form-group">
+
+                    <label for="jumlah">
+                        Jumlah
+                    </label>
+
+                    <input
+                        type="number"
+                        id="jumlah"
+                        name="jumlah"
+                        min="1"
+                        value="1"
+                        required
+                    >
+
+                    <div class="help">
+
+                        Jumlah tidak membuat kode unit otomatis.
+                        Satu unit tetap memiliki satu kode QR.
+
+                    </div>
+
+                </div>
+
+
             </div>
 
 
-            <div class="form-button">
+            <div class="button-row">
 
-                <button type="submit">
-
-                    <span>
-                        +
-                    </span>
-
-                    Tambah Unit
-
+                <button
+                    type="submit"
+                    class="btn btn-primary"
+                >
+                    + Tambah Unit
                 </button>
 
             </div>
-
 
         </form>
 
     </div>
 
 
-    <!-- =====================================================
-         DAFTAR UNIT
-    ====================================================== -->
+    <!-- DAFTAR UNIT -->
 
     <div class="card">
 
-
-        <div class="card-header">
-
-            <div>
-
-                <h2 class="card-title">
-                    Semua Unit
-                </h2>
-
-                <p class="card-description">
-                    Semua cabang dapat melihat unit.
-                    Edit hanya tersedia untuk unit
-                    milik cabang Anda.
-                </p>
-
-            </div>
+        <h2>
+            Daftar Semua Unit
+        </h2>
 
 
-            <div class="unit-count">
+        <?php if (empty($groupedUnits)): ?>
 
-                <?= count($units) ?>
+            <div class="empty">
 
-                Unit
-
-            </div>
-
-
-        </div>
-
-
-        <?php if (count($units) === 0): ?>
-
-
-            <div class="empty-state">
-
-                <div class="empty-icon">
-                    📦
-                </div>
-
-                <h3>
-                    Belum ada unit
-                </h3>
-
-                <p>
-                    Tambahkan unit pertama melalui
-                    formulir di atas.
-                </p>
+                Belum ada unit yang terdaftar.
 
             </div>
 
@@ -1251,200 +976,213 @@ function e($value)
         <?php else: ?>
 
 
-            <div class="table-wrapper">
-
-                <table>
-
-                    <thead>
-
-                        <tr>
-
-                            <th>
-                                Kode
-                            </th>
-
-                            <th>
-                                Nama Unit
-                            </th>
-
-                            <th>
-                                Kategori
-                            </th>
-
-                            <th>
-                                Cabang
-                            </th>
-
-                            <th>
-                                Status
-                            </th>
-
-                            <th>
-                                QR Token
-                            </th>
-
-                            <th>
-                                Aksi
-                            </th>
-
-                        </tr>
-
-                    </thead>
+            <?php foreach (
+                $groupedUnits as $branchName => $categories
+            ): ?>
 
 
-                    <tbody>
+                <div class="branch-section">
 
 
-                    <?php foreach ($units as $unit): ?>
+                    <div class="branch-title">
+
+                        🏢
+                        <?= htmlspecialchars(
+                            $branchName
+                        ) ?>
 
 
-                        <tr>
+                        <?php if (
+                            $branchName ===
+                            user_branch_name()
+                        ): ?>
+
+                            <span style="
+                                font-size: 11px;
+                                font-weight: normal;
+                                opacity: .8;
+                            ">
+                                Cabang Anda
+                            </span>
+
+                        <?php endif; ?>
+
+                    </div>
 
 
-                            <!-- KODE -->
-
-                            <td>
-
-                                <span class="unit-code">
-
-                                    <?= e(
-                                        $unit["kode_unit"]
-                                    ) ?>
-
-                                </span>
-
-                            </td>
+                    <?php foreach (
+                        $categories as $category => $categoryUnits
+                    ): ?>
 
 
-                            <!-- NAMA -->
-
-                            <td>
-
-                                <strong>
-
-                                    <?= e(
-                                        $unit["nama_unit"]
-                                    ) ?>
-
-                                </strong>
-
-                            </td>
+                        <div class="category-section">
 
 
-                            <!-- KATEGORI -->
+                            <div class="category-title">
 
-                            <td>
-
-                                <?= e(
-                                    $unit["kategori"]
+                                📁
+                                <?= htmlspecialchars(
+                                    $category
                                 ) ?>
 
-                            </td>
+                            </div>
 
 
-                            <!-- CABANG -->
-
-                            <td>
-
-                                <div class="owner">
-
-                                    <span class="owner-name">
-
-                                        <?= e(
-                                            $unit["nama_cabang"]
-                                        ) ?>
-
-                                    </span>
+                            <div class="unit-list">
 
 
-                                    <?php if (
-                                        (int) $unit["owner_branch_id"]
-                                        === $branch_id
-                                    ): ?>
-
-                                        <span class="owner-me">
-                                            CABANG ANDA
-                                        </span>
-
-                                    <?php endif; ?>
-
-                                </div>
-
-                            </td>
-
-
-                            <!-- STATUS -->
-
-                            <td>
-
-                                <span
-                                    class="status <?= strtolower(
-                                        e($unit["status"])
-                                    ) ?>"
-                                >
-
-                                    <?= e(
-                                        $unit["status"]
-                                    ) ?>
-
-                                </span>
-
-                            </td>
-
-
-                            <!-- QR TOKEN -->
-
-                            <td>
-
-                                <span class="qr-token">
-
-                                    <?= e(
-                                        $unit["qr_token"]
-                                    ) ?>
-
-                                </span>
-
-                            </td>
-
-
-                            <!-- AKSI -->
-
-                            <td>
-
-                                <?php if (
-                                    (int) $unit["owner_branch_id"]
-                                    === $branch_id
+                                <?php foreach (
+                                    $categoryUnits
+                                    as $unit
                                 ): ?>
 
-                                    <a
-                                        href="edit-unit.php?id=<?= (int) $unit["id"] ?>"
-                                        class="edit-btn"
-                                    >
-                                        Edit
-                                    </a>
 
-                                <?php else: ?>
-
-                                    <span class="readonly">
-                                        Read Only
-                                    </span>
-
-                                <?php endif; ?>
-
-                            </td>
+                                    <div class="unit-item">
 
 
-                        </tr>
+                                        <div class="unit-header">
+
+
+                                            <div>
+
+                                                <div class="unit-code">
+
+                                                    <?= htmlspecialchars(
+                                                        $unit['kode_unit']
+                                                    ) ?>
+
+                                                </div>
+
+
+                                                <div class="unit-name">
+
+                                                    <?= htmlspecialchars(
+                                                        $unit['nama_unit']
+                                                    ) ?>
+
+                                                </div>
+
+                                            </div>
+
+
+                                            <?php if (
+                                                $unit['status'] ===
+                                                'TERSEDIA'
+                                            ): ?>
+
+                                                <span class="
+                                                    status
+                                                    status-tersedia
+                                                ">
+                                                    TERSEDIA
+                                                </span>
+
+                                            <?php else: ?>
+
+                                                <span class="
+                                                    status
+                                                    status-disewa
+                                                ">
+                                                    DISEWAKAN
+                                                </span>
+
+                                            <?php endif; ?>
+
+
+                                        </div>
+
+
+                                        <div class="unit-info">
+
+
+                                            <div class="info-box">
+
+                                                <div class="info-label">
+                                                    Jumlah
+                                                </div>
+
+                                                <div class="info-value">
+
+                                                    <?= (int) $unit['jumlah'] ?>
+
+                                                </div>
+
+                                            </div>
+
+
+                                            <div class="info-box">
+
+                                                <div class="info-label">
+                                                    Cabang Pemilik
+                                                </div>
+
+                                                <div class="info-value">
+
+                                                    <?= htmlspecialchars(
+                                                        $unit['nama_cabang']
+                                                    ) ?>
+
+                                                </div>
+
+                                            </div>
+
+
+                                        </div>
+
+
+                                        <!-- ACTION -->
+
+                                        <div class="button-row">
+
+
+                                            <?php if (
+                                                (int) $unit['owner_branch_id']
+                                                ===
+                                                (int) $branchId
+                                            ): ?>
+
+
+                                                <a
+                                                    href="edit-unit.php?id=<?= (int) $unit['id'] ?>"
+                                                    class="btn btn-primary"
+                                                >
+                                                    Edit Unit
+                                                </a>
+
+
+                                            <?php endif; ?>
+
+
+                                            <a
+                                                href="qr.php?id=<?= (int) $unit['id'] ?>"
+                                                class="btn btn-green"
+                                            >
+                                                Lihat QR
+                                            </a>
+
+
+                                        </div>
+
+
+                                    </div>
+
+
+                                <?php endforeach; ?>
+
+
+                            </div>
+
+
+                        </div>
 
 
                     <?php endforeach; ?>
 
 
-                    </tbody>
+                </div>
 
-                </table>
 
-            </div>
+            <?php endforeach; ?>
 
 
         <?php endif; ?>
@@ -1454,7 +1192,6 @@ function e($value)
 
 
 </div>
-
 
 </body>
 

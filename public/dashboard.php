@@ -1,6 +1,65 @@
 <?php
 
-require_once "../config/auth.php";
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../config/auth.php';
+
+require_login();
+
+$branchId = user_branch_id();
+$branchName = user_branch_name();
+
+/*
+|--------------------------------------------------------------------------
+| Statistik Dashboard
+|--------------------------------------------------------------------------
+*/
+
+$totalUnit = 0;
+$unitTersedia = 0;
+$unitDisewa = 0;
+$totalTransaksiAktif = 0;
+
+try {
+
+    // Total unit milik cabang sendiri
+    $stmt = $pdo->prepare("
+        SELECT
+            COUNT(*) AS total_unit,
+            SUM(status = 'TERSEDIA') AS tersedia,
+            SUM(status = 'DISEWAKAN') AS disewa
+        FROM units
+        WHERE owner_branch_id = ?
+    ");
+
+    $stmt->execute([$branchId]);
+
+    $stats = $stmt->fetch();
+
+    if ($stats) {
+        $totalUnit = (int) ($stats['total_unit'] ?? 0);
+        $unitTersedia = (int) ($stats['tersedia'] ?? 0);
+        $unitDisewa = (int) ($stats['disewa'] ?? 0);
+    }
+
+
+    // Jumlah transaksi yang masih memiliki unit DISEWAKAN
+    $stmt = $pdo->prepare("
+        SELECT COUNT(DISTINCT r.id)
+        FROM rentals r
+        INNER JOIN rental_items ri
+            ON ri.rental_id = r.id
+        WHERE r.branch_id = ?
+          AND ri.status = 'DISEWAKAN'
+    ");
+
+    $stmt->execute([$branchId]);
+
+    $totalTransaksiAktif = (int) $stmt->fetchColumn();
+
+} catch (PDOException $e) {
+
+    // Dashboard tetap tampil walaupun statistik gagal.
+}
 
 ?>
 
@@ -26,230 +85,232 @@ require_once "../config/auth.php";
 
         body {
             margin: 0;
-            font-family:
-                Arial,
-                Helvetica,
-                sans-serif;
+            font-family: Arial, Helvetica, sans-serif;
             background: #f4f6f8;
-            color: #172033;
-        }
-
-        a {
-            color: inherit;
+            color: #1f2937;
         }
 
         .container {
-            width: 100%;
-            max-width: 1150px;
+            width: min(1200px, 94%);
             margin: 0 auto;
-            padding: 24px;
         }
 
-        /* =========================
-           HEADER
-        ========================= */
+        /*
+        |--------------------------------------------------------------------------
+        | Header
+        |--------------------------------------------------------------------------
+        */
 
         .header {
             background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 18px;
-            padding: 24px;
-            margin-bottom: 28px;
-            box-shadow:
-                0 4px 16px rgba(15, 23, 42, 0.04);
+            border-bottom: 1px solid #e5e7eb;
+            padding: 18px 0;
         }
 
-        .header-top {
+        .header-inner {
             display: flex;
-            align-items: flex-start;
             justify-content: space-between;
+            align-items: center;
             gap: 20px;
         }
 
-        .header-left {
-            min-width: 0;
-        }
-
-        .welcome-label {
-            margin: 0 0 7px;
-            color: #2563eb;
-            font-size: 13px;
-            font-weight: bold;
-            letter-spacing: 0.04em;
-        }
-
-        .header h1 {
+        .brand h1 {
             margin: 0;
-            font-size: 30px;
-            line-height: 1.2;
-            letter-spacing: -0.5px;
+            font-size: 22px;
         }
 
-        .header-description {
-            margin: 8px 0 0;
-            color: #64748b;
-            font-size: 14px;
-            line-height: 1.5;
-        }
-
-        .logout {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            padding: 10px 15px;
-            background: #fff1f2;
-            color: #dc2626;
-            border: 1px solid #fecdd3;
-            border-radius: 10px;
-            text-decoration: none;
+        .brand p {
+            margin: 5px 0 0;
+            color: #6b7280;
             font-size: 13px;
-            font-weight: bold;
-            white-space: nowrap;
-            transition: 0.2s;
         }
 
-        .logout:hover {
-            background: #fee2e2;
+        .user-area {
+            display: flex;
+            align-items: center;
+            gap: 12px;
         }
 
         .user-info {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 9px;
-            margin-top: 20px;
+            text-align: right;
         }
 
-        .info-item {
-            display: inline-flex;
-            align-items: center;
-            gap: 7px;
-            padding: 9px 12px;
-            background: #f8fafc;
-            border: 1px solid #e5e7eb;
-            border-radius: 10px;
-            color: #64748b;
+        .user-name {
+            font-weight: bold;
+            font-size: 14px;
+        }
+
+        .user-branch {
+            color: #6b7280;
+            font-size: 12px;
+            margin-top: 3px;
+        }
+
+        .logout {
+            text-decoration: none;
+            background: #fee2e2;
+            color: #991b1b;
+            padding: 9px 13px;
+            border-radius: 8px;
             font-size: 13px;
+            font-weight: bold;
         }
 
-        .info-item strong {
-            color: #172033;
+        .logout:hover {
+            background: #fecaca;
         }
 
-        /* =========================
-           SECTION
-        ========================= */
 
-        .section {
+        /*
+        |--------------------------------------------------------------------------
+        | Main
+        |--------------------------------------------------------------------------
+        */
+
+        main {
+            padding: 30px 0 50px;
+        }
+
+        .welcome {
+            margin-bottom: 25px;
+        }
+
+        .welcome h2 {
+            margin: 0 0 7px;
+            font-size: 25px;
+        }
+
+        .welcome p {
+            margin: 0;
+            color: #6b7280;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Statistik
+        |--------------------------------------------------------------------------
+        */
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
             margin-bottom: 30px;
         }
 
-        .section-header {
-            display: flex;
-            align-items: flex-end;
-            justify-content: space-between;
-            margin-bottom: 13px;
+        .stat-card {
+            background: #ffffff;
+            border-radius: 13px;
+            padding: 20px;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.05);
         }
+
+        .stat-title {
+            color: #6b7280;
+            font-size: 13px;
+            margin-bottom: 8px;
+        }
+
+        .stat-number {
+            font-size: 28px;
+            font-weight: bold;
+        }
+
+        .stat-description {
+            margin-top: 7px;
+            color: #6b7280;
+            font-size: 12px;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Menu
+        |--------------------------------------------------------------------------
+        */
 
         .section-title {
+            margin-bottom: 15px;
+        }
+
+        .section-title h2 {
             margin: 0;
-            font-size: 19px;
-            line-height: 1.3;
+            font-size: 20px;
         }
-
-        .section-description {
-            margin: 5px 0 0;
-            color: #64748b;
-            font-size: 13px;
-            line-height: 1.5;
-        }
-
-        /* =========================
-           MENU GRID
-        ========================= */
 
         .menu-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
-            gap: 14px;
+            gap: 16px;
         }
 
-        /* =========================
-           MENU CARD
-        ========================= */
-
         .menu-card {
-            position: relative;
-            display: block;
-            min-height: 155px;
-            padding: 20px;
             background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 16px;
-            color: #172033;
+            border-radius: 13px;
+            padding: 21px;
             text-decoration: none;
-            overflow: hidden;
-            transition:
-                transform 0.2s ease,
-                box-shadow 0.2s ease,
-                border-color 0.2s ease;
+            color: #1f2937;
+            border: 1px solid transparent;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.05);
+            transition: 0.2s;
         }
 
         .menu-card:hover {
-            transform: translateY(-3px);
-            border-color: #cbd5e1;
-            box-shadow:
-                0 8px 24px rgba(15, 23, 42, 0.08);
+            transform: translateY(-2px);
+            border-color: #dbeafe;
         }
 
-        .menu-card:active {
-            transform: translateY(-1px);
-        }
-
-        .icon-box {
-            width: 45px;
-            height: 45px;
+        .menu-icon {
+            width: 44px;
+            height: 44px;
+            border-radius: 10px;
+            background: #eff6ff;
             display: flex;
             align-items: center;
             justify-content: center;
-            margin-bottom: 15px;
-            background: #eff6ff;
-            border-radius: 12px;
             font-size: 22px;
+            margin-bottom: 14px;
         }
 
         .menu-card h3 {
-            margin: 0 28px 7px 0;
+            margin: 0 0 7px;
             font-size: 16px;
-            line-height: 1.35;
         }
 
         .menu-card p {
             margin: 0;
-            max-width: 290px;
-            color: #64748b;
+            color: #6b7280;
             font-size: 13px;
             line-height: 1.5;
         }
 
-        .arrow {
-            position: absolute;
-            right: 18px;
-            bottom: 18px;
-            color: #94a3b8;
-            font-size: 19px;
-            transition: 0.2s;
+
+        /*
+        |--------------------------------------------------------------------------
+        | Footer
+        |--------------------------------------------------------------------------
+        */
+
+        footer {
+            text-align: center;
+            color: #9ca3af;
+            font-size: 12px;
+            padding: 20px 0;
         }
 
-        .menu-card:hover .arrow {
-            color: #2563eb;
-            transform: translateX(4px);
-        }
 
-        /* =========================
-           MOBILE
-        ========================= */
+        /*
+        |--------------------------------------------------------------------------
+        | Responsive
+        |--------------------------------------------------------------------------
+        */
 
         @media (max-width: 900px) {
+
+            .stats {
+                grid-template-columns: repeat(2, 1fr);
+            }
 
             .menu-grid {
                 grid-template-columns: repeat(2, 1fr);
@@ -257,80 +318,46 @@ require_once "../config/auth.php";
 
         }
 
-        @media (max-width: 650px) {
 
-            .container {
-                padding: 14px;
+        @media (max-width: 600px) {
+
+            .header-inner {
+                align-items: flex-start;
             }
 
-            .header {
-                padding: 20px;
-                margin-bottom: 24px;
-                border-radius: 16px;
-            }
-
-            .header-top {
+            .user-area {
+                align-items: flex-end;
                 flex-direction: column;
-                gap: 15px;
-            }
-
-            .header h1 {
-                font-size: 25px;
-            }
-
-            .header-description {
-                font-size: 13px;
-            }
-
-            .logout {
-                width: 100%;
-            }
-
-            .user-info {
-                display: grid;
-                grid-template-columns: 1fr;
                 gap: 7px;
             }
 
-            .info-item {
-                width: 100%;
+            .user-info {
+                text-align: right;
             }
 
-            .section {
-                margin-bottom: 26px;
+            main {
+                padding-top: 22px;
             }
 
-            .section-title {
-                font-size: 17px;
+            .welcome h2 {
+                font-size: 22px;
             }
 
-            .section-description {
-                font-size: 12px;
+            .stats {
+                grid-template-columns: 1fr 1fr;
+                gap: 10px;
+            }
+
+            .stat-card {
+                padding: 16px;
+            }
+
+            .stat-number {
+                font-size: 23px;
             }
 
             .menu-grid {
                 grid-template-columns: 1fr;
-                gap: 10px;
-            }
-
-            .menu-card {
-                min-height: 140px;
-                padding: 17px;
-            }
-
-            .icon-box {
-                width: 42px;
-                height: 42px;
-                margin-bottom: 13px;
-                font-size: 20px;
-            }
-
-            .menu-card h3 {
-                font-size: 15px;
-            }
-
-            .menu-card p {
-                font-size: 12px;
             }
 
         }
@@ -341,123 +368,162 @@ require_once "../config/auth.php";
 
 <body>
 
-<div class="container">
+
+<!-- HEADER -->
+
+<header class="header">
+
+    <div class="container header-inner">
+
+        <div class="brand">
+
+            <h1>
+                Sistem Scan Unit
+            </h1>
+
+            <p>
+                Manajemen unit rental berbasis QR
+            </p>
+
+        </div>
 
 
-    <!-- =========================
-         HEADER
-    ========================== -->
+        <div class="user-area">
 
-    <div class="header">
+            <div class="user-info">
 
-        <div class="header-top">
+                <div class="user-name">
+                    <?= htmlspecialchars(user_name()) ?>
+                </div>
 
-            <div class="header-left">
-
-                <p class="welcome-label">
-                    SISTEM SCAN UNIT
-                </p>
-
-                <h1>
-                    Dashboard
-                </h1>
-
-                <p class="header-description">
-                    Kelola unit, peminjaman, scan QR,
-                    dan perpindahan unit dengan mudah.
-                </p>
+                <div class="user-branch">
+                    <?= htmlspecialchars($branchName) ?>
+                </div>
 
             </div>
 
             <a
                 href="logout.php"
                 class="logout"
+                onclick="return confirm('Yakin ingin keluar?')"
             >
                 Keluar
             </a>
 
         </div>
 
+    </div>
 
-        <div class="user-info">
+</header>
 
-            <div class="info-item">
 
-                👤
+<!-- MAIN -->
 
-                <span>
-                    Pengguna:
-                    <strong>
-                        <?= htmlspecialchars(
-                            $_SESSION["nama"],
-                            ENT_QUOTES,
-                            "UTF-8"
-                        ) ?>
-                    </strong>
-                </span>
+<main>
+
+    <div class="container">
+
+
+        <!-- WELCOME -->
+
+        <div class="welcome">
+
+            <h2>
+                Dashboard
+            </h2>
+
+            <p>
+                Selamat datang, <?= htmlspecialchars(user_name()) ?>.
+                Kelola unit rental cabang
+                <strong><?= htmlspecialchars($branchName) ?></strong>
+                dari sini.
+            </p>
+
+        </div>
+
+
+        <!-- STATISTIK -->
+
+        <div class="stats">
+
+
+            <div class="stat-card">
+
+                <div class="stat-title">
+                    Total Unit
+                </div>
+
+                <div class="stat-number">
+                    <?= $totalUnit ?>
+                </div>
+
+                <div class="stat-description">
+                    Unit milik cabang Anda
+                </div>
 
             </div>
 
 
-            <div class="info-item">
+            <div class="stat-card">
 
-                🔑
+                <div class="stat-title">
+                    Unit Tersedia
+                </div>
 
-                <span>
-                    Username:
-                    <strong>
-                        <?= htmlspecialchars(
-                            $_SESSION["username"],
-                            ENT_QUOTES,
-                            "UTF-8"
-                        ) ?>
-                    </strong>
-                </span>
+                <div class="stat-number">
+                    <?= $unitTersedia ?>
+                </div>
+
+                <div class="stat-description">
+                    Siap digunakan / disewakan
+                </div>
 
             </div>
 
 
-            <div class="info-item">
+            <div class="stat-card">
 
-                🏢
+                <div class="stat-title">
+                    Unit Disewa
+                </div>
 
-                <span>
-                    Cabang:
-                    <strong>
-                        <?= htmlspecialchars(
-                            $_SESSION["nama_cabang"],
-                            ENT_QUOTES,
-                            "UTF-8"
-                        ) ?>
-                    </strong>
-                </span>
+                <div class="stat-number">
+                    <?= $unitDisewa ?>
+                </div>
+
+                <div class="stat-description">
+                    Sedang berada di penyewa
+                </div>
+
+            </div>
+
+
+            <div class="stat-card">
+
+                <div class="stat-title">
+                    Transaksi Aktif
+                </div>
+
+                <div class="stat-number">
+                    <?= $totalTransaksiAktif ?>
+                </div>
+
+                <div class="stat-description">
+                    Masih memiliki unit disewa
+                </div>
 
             </div>
 
         </div>
 
-    </div>
 
+        <!-- MENU -->
 
-    <!-- =========================
-         MANAJEMEN UNIT
-    ========================== -->
+        <div class="section-title">
 
-    <div class="section">
-
-        <div class="section-header">
-
-            <div>
-
-                <h2 class="section-title">
-                    📦 Manajemen Unit
-                </h2>
-
-                <p class="section-description">
-                    Kelola dan lihat seluruh data unit.
-                </p>
-
-            </div>
+            <h2>
+                Menu Utama
+            </h2>
 
         </div>
 
@@ -465,119 +531,39 @@ require_once "../config/auth.php";
         <div class="menu-grid">
 
 
-            <a
-                href="units.php"
-                class="menu-card"
-            >
-
-                <div class="icon-box">
-                    📋
-                </div>
-
-                <h3>
-                    Daftar Unit
-                </h3>
-
-                <p>
-                    Melihat seluruh unit yang
-                    terdaftar dalam sistem.
-                </p>
-
-                <span class="arrow">
-                    →
-                </span>
-
-            </a>
-
+            <!-- DATA UNIT -->
 
             <a
                 href="units.php"
                 class="menu-card"
             >
 
-                <div class="icon-box">
-                    ➕
+                <div class="menu-icon">
+                    📦
                 </div>
 
                 <h3>
-                    Tambah Unit
+                    Data Unit
                 </h3>
 
                 <p>
-                    Mendaftarkan unit baru
-                    ke cabang Anda.
+                    Kelola unit milik cabang,
+                    tambah unit, edit informasi,
+                    dan lihat QR.
                 </p>
-
-                <span class="arrow">
-                    →
-                </span>
 
             </a>
 
 
-            <a
-                href="qr.php"
-                class="menu-card"
-            >
-
-                <div class="icon-box">
-                    🔳
-                </div>
-
-                <h3>
-                    QR Unit
-                </h3>
-
-                <p>
-                    Melihat dan mencetak
-                    QR Code unit.
-                </p>
-
-                <span class="arrow">
-                    →
-                </span>
-
-            </a>
-
-
-        </div>
-
-    </div>
-
-
-    <!-- =========================
-         SCAN
-    ========================== -->
-
-    <div class="section">
-
-        <div class="section-header">
-
-            <div>
-
-                <h2 class="section-title">
-                    📷 Scan Unit
-                </h2>
-
-                <p class="section-description">
-                    Gunakan kamera untuk membaca QR Code.
-                </p>
-
-            </div>
-
-        </div>
-
-
-        <div class="menu-grid">
-
+            <!-- SCAN UNIT KELUAR -->
 
             <a
                 href="scan-keluar.php"
                 class="menu-card"
             >
 
-                <div class="icon-box">
-                    📤
+                <div class="menu-icon">
+                    📷
                 </div>
 
                 <h3>
@@ -585,80 +571,45 @@ require_once "../config/auth.php";
                 </h3>
 
                 <p>
-                    Scan unit sebelum
-                    disewakan kepada penyewa.
+                    Scan beberapa unit sekaligus
+                    sebelum membuat transaksi rental.
                 </p>
-
-                <span class="arrow">
-                    →
-                </span>
 
             </a>
 
 
+            <!-- CEK UNIT KELUAR -->
+
             <a
-                href="scan-cek.php"
+                href="cek-keluar.php"
                 class="menu-card"
             >
 
-                <div class="icon-box">
-                    🔍
+                <div class="menu-icon">
+                    🔎
                 </div>
 
                 <h3>
-                    Scan Unit Cek
+                    Cek Unit Keluar
                 </h3>
 
                 <p>
-                    Cek informasi, cabang,
-                    dan status unit.
+                    Cek unit yang sedang disewa
+                    berdasarkan kode unit atau kode penyewa.
                 </p>
-
-                <span class="arrow">
-                    →
-                </span>
 
             </a>
 
 
-        </div>
-
-    </div>
-
-
-    <!-- =========================
-         OPERASIONAL
-    ========================== -->
-
-    <div class="section">
-
-        <div class="section-header">
-
-            <div>
-
-                <h2 class="section-title">
-                    🔄 Operasional
-                </h2>
-
-                <p class="section-description">
-                    Kelola pergerakan dan perpindahan unit.
-                </p>
-
-            </div>
-
-        </div>
-
-
-        <div class="menu-grid">
-
+            <!-- UNIT MASUK -->
 
             <a
                 href="unit-masuk.php"
                 class="menu-card"
             >
 
-                <div class="icon-box">
-                    📥
+                <div class="menu-icon">
+                    ↩️
                 </div>
 
                 <h3>
@@ -666,185 +617,119 @@ require_once "../config/auth.php";
                 </h3>
 
                 <p>
-                    Konfirmasi unit yang
-                    sudah kembali.
+                    Tandai unit yang sudah kembali
+                    dan batalkan jika terjadi kesalahan.
                 </p>
-
-                <span class="arrow">
-                    →
-                </span>
 
             </a>
 
 
+            <!-- CEK SEMUA UNIT -->
+
             <a
-                href="transfer.php"
+                href="cek-unit.php"
                 class="menu-card"
             >
 
-                <div class="icon-box">
-                    🔄
+                <div class="menu-icon">
+                    🏢
                 </div>
 
                 <h3>
-                    Transfer / Oper Unit
+                    Cek Semua Unit
                 </h3>
 
                 <p>
-                    Memindahkan unit
-                    ke cabang lain.
+                    Lihat unit dari seluruh cabang
+                    beserta status dan pemiliknya.
                 </p>
-
-                <span class="arrow">
-                    →
-                </span>
 
             </a>
 
 
-        </div>
+            <!-- SCAN CEK UNIT -->
 
-    </div>
+            <a
+                href="scan-cek.php"
+                class="menu-card"
+            >
 
+                <div class="menu-icon">
+                    🔍
+                </div>
 
-    <!-- =========================
-         RIWAYAT
-    ========================== -->
+                <h3>
+                    Scan Cek Unit
+                </h3>
 
-    <div class="section">
-
-        <div class="section-header">
-
-            <div>
-
-                <h2 class="section-title">
-                    📋 Riwayat
-                </h2>
-
-                <p class="section-description">
-                    Melihat aktivitas unit.
+                <p>
+                    Scan QR untuk melihat informasi
+                    dan status sebuah unit.
                 </p>
 
-            </div>
-
-        </div>
+            </a>
 
 
-        <div class="menu-grid">
-
+            <!-- RIWAYAT -->
 
             <a
                 href="riwayat.php"
                 class="menu-card"
             >
 
-                <div class="icon-box">
-                    🕘
+                <div class="menu-icon">
+                    📋
                 </div>
 
                 <h3>
-                    Riwayat Aktivitas
+                    Riwayat
                 </h3>
 
                 <p>
-                    Lihat catatan keluar,
-                    masuk, dan transfer unit.
+                    Lihat aktivitas unit berdasarkan
+                    bulan dan tahun.
                 </p>
-
-                <span class="arrow">
-                    →
-                </span>
 
             </a>
 
 
-        </div>
-
-    </div>
-
-
-    <!-- =========================
-         MANAJEMEN SISTEM
-    ========================== -->
-
-    <div class="section">
-
-        <div class="section-header">
-
-            <div>
-
-                <h2 class="section-title">
-                    ⚙️ Manajemen Sistem
-                </h2>
-
-                <p class="section-description">
-                    Pengaturan data dasar sistem.
-                </p>
-
-            </div>
-
-        </div>
-
-
-        <div class="menu-grid">
-
+            <!-- TRANSFER -->
 
             <a
-                href="branches.php"
+                href="transfer.php"
                 class="menu-card"
             >
 
-                <div class="icon-box">
-                    🏢
+                <div class="menu-icon">
+                    🔄
                 </div>
 
                 <h3>
-                    Manajemen Cabang
+                    Transfer Unit
                 </h3>
 
                 <p>
-                    Menambah dan melihat
-                    daftar cabang.
+                    Kirim unit ke cabang lain
+                    dan konfirmasi unit yang masuk.
                 </p>
-
-                <span class="arrow">
-                    →
-                </span>
-
-            </a>
-
-
-            <a
-                href="register.php"
-                class="menu-card"
-            >
-
-                <div class="icon-box">
-                    👤
-                </div>
-
-                <h3>
-                    Registrasi Akun
-                </h3>
-
-                <p>
-                    Membuat akun pengguna
-                    untuk cabang.
-                </p>
-
-                <span class="arrow">
-                    →
-                </span>
 
             </a>
 
 
         </div>
 
+
     </div>
 
+</main>
 
-</div>
+
+<footer>
+
+    Sistem Scan Unit V2
+
+</footer>
+
 
 </body>
 

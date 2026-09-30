@@ -1,54 +1,628 @@
 <?php
 
-require_once "../config/auth.php";
-require_once "../config/database.php";
-require_once "../config/csrf.php";
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../config/auth.php';
+require_once __DIR__ . '/../config/csrf.php';
 
-// ============================================================
-// AMBIL UNIT YANG SEDANG DISEWAKAN
-// HANYA UNIT MILIK CABANG USER YANG LOGIN
-// ============================================================
+require_login();
 
-try {
+$branchId = user_branch_id();
+$userId   = user_id();
 
-    $stmt = $pdo->prepare(
-        "SELECT
-            rentals.id AS rental_id,
-            units.id AS unit_id,
-            units.kode_unit,
-            units.nama_unit,
-            units.kategori,
-            rentals.renter_code,
-            rentals.checkout_at
-         FROM rentals
-         INNER JOIN units
-            ON rentals.unit_id = units.id
-         WHERE rentals.status = 'AKTIF'
-           AND units.owner_branch_id = ?
-           AND units.status = 'DISEWAKAN'
-         ORDER BY rentals.checkout_at DESC"
-    );
+$success = '';
+$error   = '';
 
-    $stmt->execute([
-        (int) $_SESSION["branch_id"]
-    ]);
+/*
+|--------------------------------------------------------------------------
+| PESAN DARI REDIRECT
+|--------------------------------------------------------------------------
+*/
 
-    $rentals = $stmt->fetchAll();
+if (isset($_GET['success'])) {
 
-} catch (PDOException $e) {
+    if ($_GET['success'] === 'selesai') {
+        $success = 'Unit berhasil ditandai sebagai masuk.';
+    }
 
-    error_log(
-        "unit-masuk.php database error: " .
-        $e->getMessage()
-    );
-
-    $rentals = [];
+    elseif ($_GET['success'] === 'dibatalkan') {
+        $success = 'Status selesai berhasil dibatalkan. Unit kembali menjadi disewakan.';
+    }
 }
 
-$totalRentals = count($rentals);
+if (isset($_SESSION['unit_masuk_error'])) {
+
+    $error = $_SESSION['unit_masuk_error'];
+
+    unset($_SESSION['unit_masuk_error']);
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| PROSES POST
+|--------------------------------------------------------------------------
+*/
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+
+    $action = $_POST['action'] ?? '';
+    $token  = $_POST['csrf_token'] ?? '';
+
+    /*
+    |--------------------------------------------------------------------------
+    | CEK CSRF
+    |--------------------------------------------------------------------------
+    */
+
+    if (!verify_csrf($token)) {
+
+        $_SESSION['unit_masuk_error'] =
+            'Token keamanan tidak valid. Silakan coba lagi.';
+
+        header('Location: unit-masuk.php');
+        exit;
+    }
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | VALIDASI RENTAL ITEM
+    |--------------------------------------------------------------------------
+    */
+
+    $rentalItemId = (int)($_POST['rental_item_id'] ?? 0);
+
+    if ($rentalItemId <= 0) {
+
+        $_SESSION['unit_masuk_error'] =
+            'Data unit tidak valid.';
+
+        header('Location: unit-masuk.php');
+        exit;
+    }
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | UNIT MASUK / SELESAI
+    |--------------------------------------------------------------------------
+    */
+
+    if ($action === 'selesai') {
+
+        try {
+
+            $pdo->beginTransaction();
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | AMBIL RENTAL ITEM
+            |--------------------------------------------------------------------------
+            | FOR UPDATE digunakan agar data tidak berubah bersamaan.
+            |--------------------------------------------------------------------------
+            */
+
+            $stmt = $pdo->prepare("
+                SELECT
+                    ri.id AS rental_item_id,
+                    ri.rental_id,
+                    ri.unit_id,
+                    ri.status AS rental_item_status,
+
+                    r.branch_id,
+                    r.renter_code,
+                    r.checkout_by,
+                    r.checkout_at,
+
+                    u.kode_unit,
+                    u.nama_unit,
+                    u.owner_branch_id,
+                    u.status AS unit_status
+
+                FROM rental_items ri
+
+                INNER JOIN rentals r
+                    ON r.id = ri.rental_id
+
+                INNER JOIN units u
+                    ON u.id = ri.unit_id
+
+                WHERE ri.id = ?
+
+                FOR UPDATE
+            ");
+
+            $stmt->execute([
+                $rentalItemId
+            ]);
+
+            $item = $stmt->fetch();
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | CEK DATA
+            |--------------------------------------------------------------------------
+            */
+
+            if (!$item) {
+
+                throw new Exception(
+                    'Data transaksi unit tidak ditemukan.'
+                );
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | PASTIKAN TRANSAKSI MILIK CABANG LOGIN
+            |--------------------------------------------------------------------------
+            */
+
+            if ((int)$item['branch_id'] !== (int)$branchId) {
+
+                throw new Exception(
+                    'Anda tidak memiliki akses ke transaksi unit ini.'
+                );
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | PASTIKAN BELUM SELESAI
+            |--------------------------------------------------------------------------
+            */
+
+            if ($item['rental_item_status'] === 'SELESAI') {
+
+                throw new Exception(
+                    'Unit ini sudah ditandai sebagai selesai.'
+                );
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | PASTIKAN STATUS UNIT DISEWAKAN
+            |--------------------------------------------------------------------------
+            */
+
+            if ($item['unit_status'] !== 'DISEWAKAN') {
+
+                throw new Exception(
+                    'Status unit tidak sesuai untuk proses pengembalian.'
+                );
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | UPDATE RENTAL ITEM
+            |--------------------------------------------------------------------------
+            */
+
+            $stmtUpdateItem = $pdo->prepare("
+                UPDATE rental_items
+                SET
+                    status = 'SELESAI',
+                    returned_by = ?,
+                    returned_at = NOW()
+                WHERE id = ?
+            ");
+
+            $stmtUpdateItem->execute([
+                $userId,
+                $rentalItemId
+            ]);
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | UPDATE STATUS UNIT
+            |--------------------------------------------------------------------------
+            */
+
+            $stmtUpdateUnit = $pdo->prepare("
+                UPDATE units
+                SET
+                    status = 'TERSEDIA',
+                    updated_at = NOW()
+                WHERE id = ?
+            ");
+
+            $stmtUpdateUnit->execute([
+                $item['unit_id']
+            ]);
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | SIMPAN HISTORY
+            |--------------------------------------------------------------------------
+            */
+
+            $description =
+                'Unit ' .
+                $item['kode_unit'] .
+                ' telah masuk kembali dari penyewaan dengan kode penyewa ' .
+                $item['renter_code'] .
+                '. Transaksi rental #' .
+                $item['rental_id'] .
+                '.';
+
+
+            $stmtHistory = $pdo->prepare("
+                INSERT INTO unit_history
+                (
+                    unit_id,
+                    performed_by,
+                    branch_id,
+                    action,
+                    description,
+                    created_at
+                )
+                VALUES
+                (
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    NOW()
+                )
+            ");
+
+            $stmtHistory->execute([
+                $item['unit_id'],
+                $userId,
+                $branchId,
+                'MASUK',
+                $description
+            ]);
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | COMMIT
+            |--------------------------------------------------------------------------
+            */
+
+            $pdo->commit();
+
+
+            header(
+                'Location: unit-masuk.php?success=selesai'
+            );
+
+            exit;
+
+        } catch (Throwable $e) {
+
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+
+            $_SESSION['unit_masuk_error'] =
+                'Unit gagal diproses: ' .
+                $e->getMessage();
+
+            header('Location: unit-masuk.php');
+            exit;
+        }
+    }
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | BATALKAN STATUS SELESAI
+    |--------------------------------------------------------------------------
+    */
+
+    elseif ($action === 'batalkan') {
+
+        try {
+
+            $pdo->beginTransaction();
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | AMBIL RENTAL ITEM
+            |--------------------------------------------------------------------------
+            */
+
+            $stmt = $pdo->prepare("
+                SELECT
+                    ri.id AS rental_item_id,
+                    ri.rental_id,
+                    ri.unit_id,
+                    ri.status AS rental_item_status,
+
+                    r.branch_id,
+                    r.renter_code,
+
+                    u.kode_unit,
+                    u.nama_unit,
+                    u.status AS unit_status
+
+                FROM rental_items ri
+
+                INNER JOIN rentals r
+                    ON r.id = ri.rental_id
+
+                INNER JOIN units u
+                    ON u.id = ri.unit_id
+
+                WHERE ri.id = ?
+
+                FOR UPDATE
+            ");
+
+            $stmt->execute([
+                $rentalItemId
+            ]);
+
+            $item = $stmt->fetch();
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | CEK DATA
+            |--------------------------------------------------------------------------
+            */
+
+            if (!$item) {
+
+                throw new Exception(
+                    'Data transaksi unit tidak ditemukan.'
+                );
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | CEK CABANG
+            |--------------------------------------------------------------------------
+            */
+
+            if ((int)$item['branch_id'] !== (int)$branchId) {
+
+                throw new Exception(
+                    'Anda tidak memiliki akses ke transaksi unit ini.'
+                );
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | HARUS SELESAI UNTUK DIBATALKAN
+            |--------------------------------------------------------------------------
+            */
+
+            if ($item['rental_item_status'] !== 'SELESAI') {
+
+                throw new Exception(
+                    'Unit ini belum berstatus selesai.'
+                );
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | UPDATE RENTAL ITEM KEMBALI KE DISEWAKAN
+            |--------------------------------------------------------------------------
+            */
+
+            $stmtUpdateItem = $pdo->prepare("
+                UPDATE rental_items
+                SET
+                    status = 'DISEWAKAN',
+                    returned_by = NULL,
+                    returned_at = NULL
+                WHERE id = ?
+            ");
+
+            $stmtUpdateItem->execute([
+                $rentalItemId
+            ]);
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | UPDATE UNIT KEMBALI KE DISEWAKAN
+            |--------------------------------------------------------------------------
+            */
+
+            $stmtUpdateUnit = $pdo->prepare("
+                UPDATE units
+                SET
+                    status = 'DISEWAKAN',
+                    updated_at = NOW()
+                WHERE id = ?
+            ");
+
+            $stmtUpdateUnit->execute([
+                $item['unit_id']
+            ]);
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | SIMPAN HISTORY
+            |--------------------------------------------------------------------------
+            */
+
+            $description =
+                'Status masuk unit ' .
+                $item['kode_unit'] .
+                ' dibatalkan. Unit dikembalikan menjadi DISEWAKAN. ' .
+                'Transaksi rental #' .
+                $item['rental_id'] .
+                '.';
+
+
+            $stmtHistory = $pdo->prepare("
+                INSERT INTO unit_history
+                (
+                    unit_id,
+                    performed_by,
+                    branch_id,
+                    action,
+                    description,
+                    created_at
+                )
+                VALUES
+                (
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    NOW()
+                )
+            ");
+
+            $stmtHistory->execute([
+                $item['unit_id'],
+                $userId,
+                $branchId,
+                'BATAL_MASUK',
+                $description
+            ]);
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | COMMIT
+            |--------------------------------------------------------------------------
+            */
+
+            $pdo->commit();
+
+
+            header(
+                'Location: unit-masuk.php?success=dibatalkan'
+            );
+
+            exit;
+
+        } catch (Throwable $e) {
+
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+
+            $_SESSION['unit_masuk_error'] =
+                'Status unit gagal dibatalkan: ' .
+                $e->getMessage();
+
+            header('Location: unit-masuk.php');
+            exit;
+        }
+    }
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| AMBIL DATA UNIT DISEWAKAN
+|--------------------------------------------------------------------------
+|
+| Menampilkan unit yang sedang disewakan pada cabang login.
+|--------------------------------------------------------------------------
+*/
+
+$stmt = $pdo->prepare("
+    SELECT
+        ri.id AS rental_item_id,
+        ri.rental_id,
+        ri.unit_id,
+        ri.status AS rental_item_status,
+
+        r.renter_code,
+        r.checkout_at,
+
+        u.kode_unit,
+        u.nama_unit,
+        u.kategori,
+        u.jumlah,
+        u.status AS unit_status
+
+    FROM rental_items ri
+
+    INNER JOIN rentals r
+        ON r.id = ri.rental_id
+
+    INNER JOIN units u
+        ON u.id = ri.unit_id
+
+    WHERE r.branch_id = ?
+      AND ri.status = 'DISEWAKAN'
+
+    ORDER BY
+        r.checkout_at DESC,
+        ri.id DESC
+");
+
+$stmt->execute([
+    $branchId
+]);
+
+$activeRentals = $stmt->fetchAll();
+
+
+/*
+|--------------------------------------------------------------------------
+| AMBIL DATA UNIT SELESAI
+|--------------------------------------------------------------------------
+|
+| Ditampilkan sebagai riwayat singkat agar status selesai yang salah
+| masih bisa dibatalkan.
+|--------------------------------------------------------------------------
+*/
+
+$stmt = $pdo->prepare("
+    SELECT
+        ri.id AS rental_item_id,
+        ri.rental_id,
+        ri.unit_id,
+        ri.status AS rental_item_status,
+
+        r.renter_code,
+        r.checkout_at,
+
+        u.kode_unit,
+        u.nama_unit,
+        u.kategori,
+
+        ri.returned_at
+
+    FROM rental_items ri
+
+    INNER JOIN rentals r
+        ON r.id = ri.rental_id
+
+    INNER JOIN units u
+        ON u.id = ri.unit_id
+
+    WHERE r.branch_id = ?
+      AND ri.status = 'SELESAI'
+
+    ORDER BY
+        ri.returned_at DESC,
+        ri.id DESC
+
+    LIMIT 50
+");
+
+$stmt->execute([
+    $branchId
+]);
+
+$completedRentals = $stmt->fetchAll();
 
 ?>
-
 <!DOCTYPE html>
 <html lang="id">
 
@@ -61,7 +635,7 @@ $totalRentals = count($rentals);
         content="width=device-width, initial-scale=1.0"
     >
 
-    <title>Unit Masuk - Sistem Scan Unit</title>
+    <title>Unit Masuk</title>
 
     <style>
 
@@ -71,471 +645,237 @@ $totalRentals = count($rentals);
 
         body {
             margin: 0;
-            font-family:
-                Arial,
-                Helvetica,
-                sans-serif;
-            background: #f5f7fb;
-            color: #111827;
+            padding: 0;
+            font-family: Arial, Helvetica, sans-serif;
+            background: #f4f6f8;
+            color: #1f2937;
         }
 
         .container {
-            width: 92%;
+            width: 100%;
             max-width: 1100px;
-            margin: 32px auto 50px;
+            margin: 0 auto;
+            padding: 25px 20px 50px;
         }
 
-        /* =====================================================
-           TOP NAVIGATION
-           ===================================================== */
-
-        .back {
-            display: inline-flex;
-            align-items: center;
-            gap: 7px;
-
-            margin-bottom: 22px;
-
-            color: #2563eb;
-            text-decoration: none;
-            font-size: 14px;
-            font-weight: 600;
-
-            transition: 0.2s;
-        }
-
-        .back:hover {
-            color: #1d4ed8;
-        }
-
-        /* =====================================================
-           HEADER
-           ===================================================== */
-
-        .page-header {
-            margin-bottom: 22px;
-        }
-
-        .page-title {
-            margin: 0 0 7px;
-
-            font-size: 30px;
-            line-height: 1.2;
-            font-weight: 700;
-            letter-spacing: -0.5px;
-        }
-
-        .page-description {
-            margin: 0;
-
-            max-width: 700px;
-
-            color: #6b7280;
-            font-size: 15px;
-            line-height: 1.6;
-        }
-
-        /* =====================================================
-           SUMMARY
-           ===================================================== */
-
-        .summary {
+        .topbar {
             display: flex;
-            align-items: center;
             justify-content: space-between;
+            align-items: center;
             gap: 15px;
-
-            margin-bottom: 20px;
-
-            padding: 18px 20px;
-
-            background: #ffffff;
-
-            border: 1px solid #e5e7eb;
-            border-radius: 14px;
-
-            box-shadow:
-                0 3px 12px rgba(15, 23, 42, 0.04);
+            margin-bottom: 25px;
         }
 
-        .summary-left {
-            display: flex;
-            align-items: center;
-            gap: 14px;
-        }
-
-        .summary-icon {
-            width: 42px;
-            height: 42px;
-
-            display: flex;
-            align-items: center;
-            justify-content: center;
-
-            background: #eff6ff;
-
-            border-radius: 11px;
-
-            color: #2563eb;
-            font-size: 20px;
-        }
-
-        .summary-title {
-            margin: 0 0 3px;
-
-            font-size: 14px;
-            color: #6b7280;
-        }
-
-        .summary-text {
+        .topbar h1 {
             margin: 0;
-
-            font-size: 16px;
-            font-weight: 700;
+            font-size: 28px;
         }
 
-        .summary-number {
-            min-width: 42px;
-            height: 42px;
-
-            display: flex;
-            align-items: center;
-            justify-content: center;
-
-            padding: 0 12px;
-
-            background: #2563eb;
+        .back-btn {
+            display: inline-block;
+            text-decoration: none;
+            background: #374151;
             color: white;
-
-            border-radius: 10px;
-
-            font-size: 18px;
-            font-weight: 700;
-        }
-
-        /* =====================================================
-           ALERT
-           ===================================================== */
-
-        .alert {
-            display: flex;
-            align-items: flex-start;
-            gap: 11px;
-
-            margin-bottom: 20px;
-
-            padding: 15px 17px;
-
-            border-radius: 12px;
-
+            padding: 10px 16px;
+            border-radius: 8px;
             font-size: 14px;
-            line-height: 1.5;
         }
 
-        .alert-icon {
-            flex-shrink: 0;
-
-            font-size: 17px;
+        .back-btn:hover {
+            background: #1f2937;
         }
 
-        .alert-success {
-            background: #ecfdf5;
+        .info-box {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+        }
+
+        .info-box h2 {
+            margin: 0 0 8px;
+        }
+
+        .branch-info {
+            color: #6b7280;
+            font-size: 14px;
+        }
+
+        .message {
+            padding: 13px 16px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            font-size: 14px;
+        }
+
+        .message.success {
+            background: #dcfce7;
             color: #166534;
             border: 1px solid #bbf7d0;
         }
 
-        .alert-info {
-            background: #eff6ff;
-            color: #1e40af;
-            border: 1px solid #bfdbfe;
+        .message.error {
+            background: #fee2e2;
+            color: #991b1b;
+            border: 1px solid #fecaca;
         }
 
-        /* =====================================================
-           MAIN CARD
-           ===================================================== */
-
-        .card {
-            background: #ffffff;
-
-            border: 1px solid #e5e7eb;
-            border-radius: 16px;
-
-            overflow: hidden;
-
-            box-shadow:
-                0 4px 18px rgba(15, 23, 42, 0.05);
+        .section {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.06);
         }
 
-        .card-header {
-            padding: 20px 22px;
-
-            border-bottom: 1px solid #e5e7eb;
+        .section-title {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 18px;
         }
 
-        .card-header h2 {
-            margin: 0 0 4px;
-
-            font-size: 18px;
-        }
-
-        .card-header p {
+        .section-title h2 {
             margin: 0;
+            font-size: 21px;
+        }
 
-            color: #6b7280;
+        .badge {
+            background: #e5e7eb;
+            color: #374151;
+            border-radius: 20px;
+            padding: 6px 11px;
             font-size: 13px;
+            font-weight: bold;
         }
 
-        /* =====================================================
-           TABLE
-           ===================================================== */
-
-        .table-wrapper {
-            width: 100%;
-            overflow-x: auto;
+        .rental-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
         }
 
-        table {
-            width: 100%;
-
-            border-collapse: collapse;
-
-            min-width: 820px;
+        .rental-card {
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 16px;
         }
 
-        th {
-            padding: 13px 16px;
-
-            background: #f8fafc;
-
-            color: #6b7280;
-
-            font-size: 12px;
-            font-weight: 700;
-
-            text-align: left;
-
-            text-transform: uppercase;
-            letter-spacing: 0.3px;
-
-            border-bottom: 1px solid #e5e7eb;
+        .rental-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 15px;
         }
-
-        td {
-            padding: 15px 16px;
-
-            font-size: 14px;
-
-            border-bottom: 1px solid #f1f5f9;
-
-            vertical-align: middle;
-        }
-
-        tbody tr {
-            transition: background 0.15s ease;
-        }
-
-        tbody tr:hover {
-            background: #fafcff;
-        }
-
-        tbody tr:last-child td {
-            border-bottom: none;
-        }
-
-        /* =====================================================
-           UNIT INFO
-           ===================================================== */
 
         .unit-code {
-            display: inline-flex;
-            align-items: center;
-
-            padding: 6px 9px;
-
-            background: #f3f4f6;
-
-            border-radius: 7px;
-
-            color: #111827;
-
-            font-size: 13px;
-            font-weight: 700;
-            font-family: monospace;
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 5px;
         }
 
         .unit-name {
-            font-weight: 600;
-            color: #111827;
+            font-size: 15px;
+            color: #374151;
+            margin-bottom: 6px;
         }
 
-        .category {
+        .meta {
+            font-size: 13px;
             color: #6b7280;
+            line-height: 1.7;
         }
 
-        .renter-code {
-            display: inline-flex;
-            align-items: center;
-
+        .status {
+            display: inline-block;
+            background: #fee2e2;
+            color: #991b1b;
             padding: 6px 10px;
-
-            background: #fef3c7;
-
-            color: #92400e;
-
-            border-radius: 7px;
-
-            font-size: 13px;
-            font-weight: 700;
-            font-family: monospace;
-            letter-spacing: 1px;
-        }
-
-        .checkout-time {
-            color: #6b7280;
-            font-size: 13px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
             white-space: nowrap;
         }
 
-        /* =====================================================
-           ACTION BUTTON
-           ===================================================== */
-
-        .action-form {
-            margin: 0;
+        .status-done {
+            background: #dcfce7;
+            color: #166534;
         }
 
-        .button {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 7px;
+        .action-area {
+            margin-top: 14px;
+            padding-top: 14px;
+            border-top: 1px solid #e5e7eb;
+        }
 
-            padding: 9px 13px;
-
+        .btn {
             border: none;
-            border-radius: 8px;
-
-            background: #16a34a;
-            color: #ffffff;
-
-            font-size: 13px;
-            font-weight: 600;
-
             cursor: pointer;
-
-            transition:
-                background 0.2s,
-                transform 0.1s;
+            padding: 11px 15px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: bold;
         }
 
-        .button:hover {
+        .btn-success {
+            background: #16a34a;
+            color: white;
+        }
+
+        .btn-success:hover {
             background: #15803d;
         }
 
-        .button:active {
-            transform: scale(0.98);
+        .btn-warning {
+            background: #f59e0b;
+            color: white;
         }
 
-        .button:focus-visible {
-            outline: 3px solid rgba(22, 163, 74, 0.25);
-            outline-offset: 2px;
+        .btn-warning:hover {
+            background: #d97706;
         }
-
-        /* =====================================================
-           EMPTY STATE
-           ===================================================== */
 
         .empty {
-            padding: 55px 25px;
-
             text-align: center;
-        }
-
-        .empty-icon {
-            width: 58px;
-            height: 58px;
-
-            display: flex;
-            align-items: center;
-            justify-content: center;
-
-            margin: 0 auto 15px;
-
-            background: #f3f4f6;
-
-            border-radius: 50%;
-
+            padding: 30px 15px;
             color: #6b7280;
-
-            font-size: 25px;
         }
 
-        .empty h3 {
-            margin: 0 0 7px;
-
-            font-size: 17px;
-        }
-
-        .empty p {
-            margin: 0;
-
+        .small-note {
             color: #6b7280;
-
-            font-size: 14px;
-            line-height: 1.5;
+            font-size: 13px;
+            margin-top: -8px;
+            margin-bottom: 18px;
         }
-
-        /* =====================================================
-           MOBILE
-           ===================================================== */
 
         @media (max-width: 700px) {
 
             .container {
-                width: 94%;
-                margin: 22px auto 35px;
+                padding: 15px 12px 35px;
             }
 
-            .page-title {
-                font-size: 25px;
+            .topbar {
+                flex-direction: column;
+                align-items: flex-start;
             }
 
-            .page-description {
-                font-size: 14px;
+            .topbar h1 {
+                font-size: 23px;
             }
 
-            .summary {
-                padding: 15px;
+            .rental-top {
+                flex-direction: column;
             }
 
-            .summary-text {
-                font-size: 14px;
+            .status {
+                align-self: flex-start;
             }
 
-            .summary-number {
-                min-width: 38px;
-                height: 38px;
-                font-size: 16px;
-            }
-
-            .card-header {
-                padding: 17px;
-            }
-
-            /*
-             * Tabel tetap bisa digeser horizontal
-             * agar data tidak dipotong di HP.
-             */
-
-            th,
-            td {
-                padding: 12px;
-            }
-
-            .button {
+            .btn {
                 width: 100%;
             }
-
         }
 
     </style>
@@ -546,337 +886,314 @@ $totalRentals = count($rentals);
 
 <div class="container">
 
-    <!-- =====================================================
-         BACK
-         ===================================================== -->
+    <!-- ==========================================================
+         HEADER
+    =========================================================== -->
 
-    <a
-        href="dashboard.php"
-        class="back"
-    >
-        ← Kembali ke Dashboard
-    </a>
+    <div class="topbar">
 
+        <h1>📦 Unit Masuk</h1>
 
-    <!-- =====================================================
-         PAGE HEADER
-         ===================================================== -->
-
-    <div class="page-header">
-
-        <h1 class="page-title">
-            Unit Masuk
-        </h1>
-
-        <p class="page-description">
-            Kelola unit yang masih dalam status disewakan
-            dan konfirmasi ketika unit sudah kembali
-            ke cabang Anda.
-        </p>
+        <a
+            href="dashboard.php"
+            class="back-btn"
+        >
+            ← Kembali ke Dashboard
+        </a>
 
     </div>
 
 
-    <!-- =====================================================
-         SUCCESS MESSAGE
-         ===================================================== -->
+    <!-- ==========================================================
+         INFORMASI CABANG
+    =========================================================== -->
 
-    <?php if (isset($_GET["success"])): ?>
+    <div class="info-box">
 
-        <div class="alert alert-success">
+        <h2>
+            Cabang: <?= htmlspecialchars(user_branch_name()) ?>
+        </h2>
 
-            <div class="alert-icon">
-                ✓
-            </div>
-
-            <div>
-                <strong>Unit berhasil dikonfirmasi masuk.</strong>
-                Status unit sekarang sudah kembali menjadi
-                tersedia.
-            </div>
-
-        </div>
-
-    <?php endif; ?>
-
-
-    <!-- =====================================================
-         SUMMARY
-         ===================================================== -->
-
-    <div class="summary">
-
-        <div class="summary-left">
-
-            <div class="summary-icon">
-                ↩
-            </div>
-
-            <div>
-
-                <p class="summary-title">
-                    Unit sedang disewakan
-                </p>
-
-                <p class="summary-text">
-                    Perlu dikonfirmasi saat kembali
-                </p>
-
-            </div>
-
-        </div>
-
-        <div class="summary-number">
-            <?= $totalRentals ?>
+        <div class="branch-info">
+            Berikut adalah unit yang sedang disewakan
+            dan unit yang baru saja diselesaikan.
         </div>
 
     </div>
 
 
-    <!-- =====================================================
-         INFO
-         ===================================================== -->
+    <!-- ==========================================================
+         PESAN
+    =========================================================== -->
 
-    <?php if ($totalRentals > 0): ?>
+    <?php if ($success !== ''): ?>
 
-        <div class="alert alert-info">
-
-            <div class="alert-icon">
-                ℹ
-            </div>
-
-            <div>
-                Pastikan unit sudah benar-benar kembali
-                sebelum menekan tombol
-                <strong>Konfirmasi Masuk</strong>.
-            </div>
-
+        <div class="message success">
+            <?= htmlspecialchars($success) ?>
         </div>
 
     <?php endif; ?>
 
 
-    <!-- =====================================================
-         MAIN CARD
-         ===================================================== -->
+    <?php if ($error !== ''): ?>
 
-    <div class="card">
+        <div class="message error">
+            <?= htmlspecialchars($error) ?>
+        </div>
 
-        <div class="card-header">
+    <?php endif; ?>
+
+
+    <!-- ==========================================================
+         UNIT YANG MASIH DISEWAKAN
+    =========================================================== -->
+
+    <div class="section">
+
+        <div class="section-title">
 
             <h2>
-                Daftar Unit Aktif
+                Unit Sedang Disewakan
             </h2>
 
-            <p>
-                Unit yang sedang berada dalam status
-                disewakan di cabang Anda.
-            </p>
+            <span class="badge">
+                <?= count($activeRentals) ?> unit
+            </span>
 
         </div>
 
+        <div class="small-note">
+            Klik <strong>Unit Masuk</strong> setelah unit benar-benar dikembalikan.
+        </div>
 
-        <?php if ($totalRentals > 0): ?>
 
-            <!-- =================================================
-                 TABLE
-                 ================================================= -->
+        <?php if (count($activeRentals) === 0): ?>
 
-            <div class="table-wrapper">
-
-                <table>
-
-                    <thead>
-
-                        <tr>
-
-                            <th>
-                                Kode Unit
-                            </th>
-
-                            <th>
-                                Nama Unit
-                            </th>
-
-                            <th>
-                                Kategori
-                            </th>
-
-                            <th>
-                                Kode Penyewa
-                            </th>
-
-                            <th>
-                                Waktu Keluar
-                            </th>
-
-                            <th>
-                                Aksi
-                            </th>
-
-                        </tr>
-
-                    </thead>
-
-                    <tbody>
-
-                    <?php foreach ($rentals as $rental): ?>
-
-                        <tr>
-
-                            <!-- KODE UNIT -->
-
-                            <td>
-
-                                <span class="unit-code">
-
-                                    <?= htmlspecialchars(
-                                        $rental["kode_unit"],
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
-
-                                </span>
-
-                            </td>
-
-
-                            <!-- NAMA UNIT -->
-
-                            <td>
-
-                                <div class="unit-name">
-
-                                    <?= htmlspecialchars(
-                                        $rental["nama_unit"],
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
-
-                                </div>
-
-                            </td>
-
-
-                            <!-- KATEGORI -->
-
-                            <td>
-
-                                <span class="category">
-
-                                    <?= htmlspecialchars(
-                                        $rental["kategori"],
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
-
-                                </span>
-
-                            </td>
-
-
-                            <!-- KODE PENYEWA -->
-
-                            <td>
-
-                                <span class="renter-code">
-
-                                    <?= htmlspecialchars(
-                                        $rental["renter_code"],
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
-
-                                </span>
-
-                            </td>
-
-
-                            <!-- WAKTU KELUAR -->
-
-                            <td>
-
-                                <span class="checkout-time">
-
-                                    <?= htmlspecialchars(
-                                        $rental["checkout_at"],
-                                        ENT_QUOTES,
-                                        "UTF-8"
-                                    ) ?>
-
-                                </span>
-
-                            </td>
-
-
-                            <!-- AKSI -->
-
-                            <td>
-
-                                <form
-                                    method="POST"
-                                    action="proses-masuk.php"
-                                    class="action-form"
-                                    onsubmit="
-                                        return confirm(
-                                            'Konfirmasi unit sudah benar-benar kembali?'
-                                        );
-                                    "
-                                >
-
-                                    <!-- RENTAL ID -->
-
-                                    <input
-                                        type="hidden"
-                                        name="rental_id"
-                                        value="<?= (int) $rental["rental_id"] ?>"
-                                    >
-
-                                    <!-- CSRF TOKEN -->
-
-                                    <?= csrf_field() ?>
-
-                                    <button
-                                        type="submit"
-                                        class="button"
-                                    >
-                                        ✓ Konfirmasi Masuk
-                                    </button>
-
-                                </form>
-
-                            </td>
-
-                        </tr>
-
-                    <?php endforeach; ?>
-
-                    </tbody>
-
-                </table>
-
+            <div class="empty">
+                Tidak ada unit yang sedang disewakan.
             </div>
 
         <?php else: ?>
 
-            <!-- =================================================
-                 EMPTY STATE
-                 ================================================= -->
+            <div class="rental-list">
+
+                <?php foreach ($activeRentals as $item): ?>
+
+                    <div class="rental-card">
+
+                        <div class="rental-top">
+
+                            <div>
+
+                                <div class="unit-code">
+                                    <?= htmlspecialchars($item['kode_unit']) ?>
+                                </div>
+
+                                <div class="unit-name">
+                                    <?= htmlspecialchars($item['nama_unit']) ?>
+                                </div>
+
+                                <div class="meta">
+
+                                    Kategori:
+                                    <?= htmlspecialchars($item['kategori']) ?>
+
+                                    <br>
+
+                                    Kode Penyewa:
+                                    <strong>
+                                        <?= htmlspecialchars($item['renter_code']) ?>
+                                    </strong>
+
+                                    <br>
+
+                                    Transaksi:
+                                    #<?= (int)$item['rental_id'] ?>
+
+                                    <br>
+
+                                    Keluar:
+                                    <?= htmlspecialchars($item['checkout_at']) ?>
+
+                                </div>
+
+                            </div>
+
+
+                            <span class="status">
+                                DISEWAKAN
+                            </span>
+
+                        </div>
+
+
+                        <div class="action-area">
+
+                            <form
+                                method="POST"
+                                action="unit-masuk.php"
+                                onsubmit="return confirm('Tandai unit ini sebagai sudah masuk?');"
+                            >
+
+                                <input
+                                    type="hidden"
+                                    name="action"
+                                    value="selesai"
+                                >
+
+                                <input
+                                    type="hidden"
+                                    name="rental_item_id"
+                                    value="<?= (int)$item['rental_item_id'] ?>"
+                                >
+
+                                <input
+                                    type="hidden"
+                                    name="csrf_token"
+                                    value="<?= htmlspecialchars(csrf_token()) ?>"
+                                >
+
+                                <button
+                                    type="submit"
+                                    class="btn btn-success"
+                                >
+                                    ✓ Unit Masuk / Selesai
+                                </button>
+
+                            </form>
+
+                        </div>
+
+                    </div>
+
+                <?php endforeach; ?>
+
+            </div>
+
+        <?php endif; ?>
+
+    </div>
+
+
+    <!-- ==========================================================
+         UNIT YANG SUDAH SELESAI
+    =========================================================== -->
+
+    <div class="section">
+
+        <div class="section-title">
+
+            <h2>
+                Riwayat Unit Masuk
+            </h2>
+
+            <span class="badge">
+                <?= count($completedRentals) ?>
+            </span>
+
+        </div>
+
+        <div class="small-note">
+            Jika tidak sengaja menekan selesai, gunakan tombol
+            <strong>Batalkan Selesai</strong>.
+        </div>
+
+
+        <?php if (count($completedRentals) === 0): ?>
 
             <div class="empty">
+                Belum ada unit yang diselesaikan.
+            </div>
 
-                <div class="empty-icon">
-                    ✓
-                </div>
+        <?php else: ?>
 
-                <h3>
-                    Tidak ada unit yang sedang disewakan
-                </h3>
+            <div class="rental-list">
 
-                <p>
-                    Semua unit di cabang Anda saat ini
-                    sudah tersedia.
-                </p>
+                <?php foreach ($completedRentals as $item): ?>
+
+                    <div class="rental-card">
+
+                        <div class="rental-top">
+
+                            <div>
+
+                                <div class="unit-code">
+                                    <?= htmlspecialchars($item['kode_unit']) ?>
+                                </div>
+
+                                <div class="unit-name">
+                                    <?= htmlspecialchars($item['nama_unit']) ?>
+                                </div>
+
+                                <div class="meta">
+
+                                    Kode Penyewa:
+                                    <strong>
+                                        <?= htmlspecialchars($item['renter_code']) ?>
+                                    </strong>
+
+                                    <br>
+
+                                    Transaksi:
+                                    #<?= (int)$item['rental_id'] ?>
+
+                                    <br>
+
+                                    Masuk:
+                                    <?= htmlspecialchars($item['returned_at']) ?>
+
+                                </div>
+
+                            </div>
+
+
+                            <span class="status status-done">
+                                SELESAI
+                            </span>
+
+                        </div>
+
+
+                        <div class="action-area">
+
+                            <form
+                                method="POST"
+                                action="unit-masuk.php"
+                                onsubmit="return confirm('Batalkan status selesai unit ini? Unit akan kembali menjadi DISEWAKAN.');"
+                            >
+
+                                <input
+                                    type="hidden"
+                                    name="action"
+                                    value="batalkan"
+                                >
+
+                                <input
+                                    type="hidden"
+                                    name="rental_item_id"
+                                    value="<?= (int)$item['rental_item_id'] ?>"
+                                >
+
+                                <input
+                                    type="hidden"
+                                    name="csrf_token"
+                                    value="<?= htmlspecialchars(csrf_token()) ?>"
+                                >
+
+                                <button
+                                    type="submit"
+                                    class="btn btn-warning"
+                                >
+                                    ↩ Batalkan Selesai
+                                </button>
+
+                            </form>
+
+                        </div>
+
+                    </div>
+
+                <?php endforeach; ?>
 
             </div>
 
@@ -887,5 +1204,4 @@ $totalRentals = count($rentals);
 </div>
 
 </body>
-
 </html>

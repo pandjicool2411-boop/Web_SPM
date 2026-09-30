@@ -1,130 +1,334 @@
 <?php
 
-require_once "../config/auth.php";
-require_once "../config/database.php";
-require_once "../config/csrf.php";
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../config/auth.php';
+require_once __DIR__ . '/../config/csrf.php';
 
-$transfer_id = filter_input(
-    INPUT_GET,
-    "transfer_id",
-    FILTER_VALIDATE_INT
-);
+require_login();
 
-if (
-    $transfer_id === false ||
-    $transfer_id === null ||
-    $transfer_id <= 0
-) {
-    http_response_code(400);
-    die("ID transfer tidak valid.");
+$transfer_id = (int) ($_GET['id'] ?? 0);
+
+if ($transfer_id <= 0) {
+    header("Location: transfer.php");
+    exit;
 }
 
-$branch_id = (int) $_SESSION["branch_id"];
+$error = $_SESSION['transfer_error'] ?? '';
+unset($_SESSION['transfer_error']);
 
+$success = $_SESSION['transfer_success'] ?? '';
+unset($_SESSION['transfer_success']);
 
 /*
 |--------------------------------------------------------------------------
-| Ambil data transfer
+| Proses scan transfer
 |--------------------------------------------------------------------------
 */
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
-$stmt = $pdo->prepare("
-    SELECT
-        unit_transfers.id,
-        unit_transfers.unit_id,
-        unit_transfers.from_branch_id,
-        unit_transfers.to_branch_id,
-        unit_transfers.status,
+    $action = $_POST['action'] ?? '';
 
-        units.kode_unit,
-        units.nama_unit,
-        units.kategori,
-        units.qr_token,
-        units.status AS unit_status,
+    if ($action === 'scan_transfer') {
 
-        from_branch.nama_cabang AS dari_cabang,
-        to_branch.nama_cabang AS ke_cabang
+        if (!verify_csrf($_POST['csrf_token'] ?? '')) {
+            $_SESSION['transfer_error'] = 'Token keamanan tidak valid.';
+            header("Location: scan-transfer.php?id=" . $transfer_id);
+            exit;
+        }
 
-    FROM unit_transfers
+        $posted_transfer_id = (int) ($_POST['transfer_id'] ?? 0);
+        $kode_unit = trim($_POST['kode_unit'] ?? '');
 
-    INNER JOIN units
-        ON unit_transfers.unit_id = units.id
+        if ($posted_transfer_id !== $transfer_id) {
+            $_SESSION['transfer_error'] = 'Transfer tidak valid.';
+            header("Location: transfer.php");
+            exit;
+        }
 
-    INNER JOIN branches AS from_branch
-        ON unit_transfers.from_branch_id = from_branch.id
+        if ($kode_unit === '') {
+            $_SESSION['transfer_error'] = 'Kode unit belum diisi.';
+            header("Location: scan-transfer.php?id=" . $transfer_id);
+            exit;
+        }
 
-    INNER JOIN branches AS to_branch
-        ON unit_transfers.to_branch_id = to_branch.id
+        try {
 
-    WHERE unit_transfers.id = ?
+            $pdo->beginTransaction();
 
-    LIMIT 1
-");
+            /*
+            |--------------------------------------------------------------------------
+            | Lock data transfer
+            |--------------------------------------------------------------------------
+            */
+            $stmt = $pdo->prepare("
+                SELECT
+                    ut.*,
+                    u.kode_unit,
+                    u.nama_unit,
+                    u.kategori,
+                    u.jumlah,
+                    u.owner_branch_id,
+                    u.status AS unit_status,
+                    fb.nama_cabang AS from_branch_name,
+                    tb.nama_cabang AS to_branch_name
+                FROM unit_transfers ut
+                INNER JOIN units u
+                    ON u.id = ut.unit_id
+                INNER JOIN branches fb
+                    ON fb.id = ut.from_branch_id
+                INNER JOIN branches tb
+                    ON tb.id = ut.to_branch_id
+                WHERE ut.id = ?
+                FOR UPDATE
+            ");
 
-$stmt->execute([$transfer_id]);
+            $stmt->execute([$transfer_id]);
+            $transfer = $stmt->fetch();
 
-$transfer = $stmt->fetch();
+            if (!$transfer) {
+                throw new Exception('Data transfer tidak ditemukan.');
+            }
 
+            /*
+            |--------------------------------------------------------------------------
+            | Pastikan user adalah cabang asal
+            |--------------------------------------------------------------------------
+            */
+            if ((int) $transfer['from_branch_id'] !== (int) user_branch_id()) {
+                throw new Exception(
+                    'Anda tidak memiliki akses untuk melakukan scan transfer ini.'
+                );
+            }
 
-if (!$transfer) {
-    http_response_code(404);
-    die("Data transfer tidak ditemukan.");
+            /*
+            |--------------------------------------------------------------------------
+            | Transfer harus masih PENDING
+            |--------------------------------------------------------------------------
+            */
+            if ($transfer['status'] !== 'PENDING') {
+                if ($transfer['status'] === 'SIAP_DI_KONFIRMASI') {
+                    throw new Exception(
+                        'Transfer ini sudah discan dan sedang menunggu konfirmasi cabang tujuan.'
+                    );
+                }
+
+                if ($transfer['status'] === 'COMPLETED') {
+                    throw new Exception(
+                        'Transfer ini sudah selesai.'
+                    );
+                }
+
+                if ($transfer['status'] === 'REJECTED') {
+                    throw new Exception(
+                        'Transfer ini sudah ditolak.'
+                    );
+                }
+
+                throw new Exception(
+                    'Transfer tidak dapat diproses dengan status saat ini.'
+                );
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Lock unit
+            |--------------------------------------------------------------------------
+            */
+            $stmt = $pdo->prepare("
+                SELECT
+                    id,
+                    kode_unit,
+                    nama_unit,
+                    kategori,
+                    jumlah,
+                    owner_branch_id,
+                    status
+                FROM units
+                WHERE id = ?
+                FOR UPDATE
+            ");
+
+            $stmt->execute([
+                $transfer['unit_id']
+            ]);
+
+            $unit = $stmt->fetch();
+
+            if (!$unit) {
+                throw new Exception('Unit transfer tidak ditemukan.');
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | QR harus sama persis dengan kode_unit
+            |--------------------------------------------------------------------------
+            */
+            if ($kode_unit !== $unit['kode_unit']) {
+                throw new Exception(
+                    'QR/kode unit tidak sesuai dengan unit yang akan ditransfer.'
+                );
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Pastikan unit masih dimiliki cabang asal
+            |--------------------------------------------------------------------------
+            */
+            if ((int) $unit['owner_branch_id'] !== (int) user_branch_id()) {
+                throw new Exception(
+                    'Unit ini sudah tidak dimiliki oleh cabang asal.'
+                );
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Unit harus tersedia
+            |--------------------------------------------------------------------------
+            */
+            if ($unit['status'] !== 'TERSEDIA') {
+                throw new Exception(
+                    'Unit tidak dapat ditransfer karena statusnya bukan TERSEDIA.'
+                );
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Update transfer
+            |--------------------------------------------------------------------------
+            */
+            $stmt = $pdo->prepare("
+                UPDATE unit_transfers
+                SET
+                    scanned_by = ?,
+                    scanned_at = NOW(),
+                    status = 'SIAP_DI_KONFIRMASI'
+                WHERE id = ?
+            ");
+
+            $stmt->execute([
+                user_id(),
+                $transfer_id
+            ]);
+
+            /*
+            |--------------------------------------------------------------------------
+            | Simpan riwayat
+            |--------------------------------------------------------------------------
+            */
+            $description =
+                'Unit ' . $unit['kode_unit'] .
+                ' discan untuk transfer dari ' .
+                $transfer['from_branch_name'] .
+                ' ke ' .
+                $transfer['to_branch_name'] .
+                '. Menunggu konfirmasi cabang tujuan.';
+
+            $stmt = $pdo->prepare("
+                INSERT INTO unit_history
+                (
+                    unit_id,
+                    performed_by,
+                    branch_id,
+                    action,
+                    description,
+                    created_at
+                )
+                VALUES
+                (
+                    ?,
+                    ?,
+                    ?,
+                    'TRANSFER_KELUAR',
+                    ?,
+                    NOW()
+                )
+            ");
+
+            $stmt->execute([
+                $unit['id'],
+                user_id(),
+                user_branch_id(),
+                $description
+            ]);
+
+            $pdo->commit();
+
+            $_SESSION['transfer_success'] =
+                'Unit berhasil discan. Transfer sekarang menunggu konfirmasi cabang tujuan.';
+
+            header("Location: transfer.php");
+            exit;
+
+        } catch (Throwable $e) {
+
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+
+            $_SESSION['transfer_error'] = $e->getMessage();
+
+            header("Location: scan-transfer.php?id=" . $transfer_id);
+            exit;
+        }
+    }
 }
-
 
 /*
 |--------------------------------------------------------------------------
-| Pastikan transfer ditujukan ke cabang yang sedang login
+| Ambil data transfer untuk ditampilkan
 |--------------------------------------------------------------------------
 */
+try {
 
-if (
-    (int) $transfer["to_branch_id"] !== $branch_id
-) {
-    http_response_code(403);
-    die(
-        "Anda tidak memiliki akses untuk menerima transfer ini."
-    );
-}
+    $stmt = $pdo->prepare("
+        SELECT
+            ut.*,
+            u.kode_unit,
+            u.nama_unit,
+            u.kategori,
+            u.jumlah,
+            u.owner_branch_id,
+            u.status AS unit_status,
+            fb.nama_cabang AS from_branch_name,
+            tb.nama_cabang AS to_branch_name
+        FROM unit_transfers ut
+        INNER JOIN units u
+            ON u.id = ut.unit_id
+        INNER JOIN branches fb
+            ON fb.id = ut.from_branch_id
+        INNER JOIN branches tb
+            ON tb.id = ut.to_branch_id
+        WHERE ut.id = ?
+        LIMIT 1
+    ");
 
+    $stmt->execute([$transfer_id]);
+    $transfer = $stmt->fetch();
 
-/*
-|--------------------------------------------------------------------------
-| Pastikan transfer masih APPROVED
-|--------------------------------------------------------------------------
-*/
+    if (!$transfer) {
+        header("Location: transfer.php");
+        exit;
+    }
 
-if ($transfer["status"] !== "APPROVED") {
-    http_response_code(409);
-    die(
-        "Transfer belum disetujui atau sudah selesai."
-    );
-}
+    /*
+    |--------------------------------------------------------------------------
+    | Hanya cabang asal yang boleh membuka halaman scan
+    |--------------------------------------------------------------------------
+    */
+    if ((int) $transfer['from_branch_id'] !== (int) user_branch_id()) {
+        http_response_code(403);
+        die("Anda tidak memiliki akses ke transfer ini.");
+    }
 
-
-/*
-|--------------------------------------------------------------------------
-| Pastikan unit masih tersedia
-|--------------------------------------------------------------------------
-|
-| Unit yang sedang disewakan tidak boleh diproses sebagai transfer.
-|
-*/
-
-if ($transfer["unit_status"] !== "TERSEDIA") {
-    http_response_code(409);
-    die(
-        "Unit tidak tersedia untuk diterima."
-    );
+} catch (Throwable $e) {
+    die("Terjadi kesalahan saat mengambil data transfer.");
 }
 
 ?>
-
 <!DOCTYPE html>
 <html lang="id">
 
 <head>
-
     <meta charset="UTF-8">
 
     <meta
@@ -134,1082 +338,532 @@ if ($transfer["unit_status"] !== "TERSEDIA") {
 
     <title>Scan Transfer Unit</title>
 
-    <script src="https://unpkg.com/html5-qrcode"></script>
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
 
     <style>
-
         * {
             box-sizing: border-box;
         }
 
         body {
             margin: 0;
-            padding: 20px;
-            font-family: Arial, sans-serif;
-            background: #f5f7fa;
-            color: #222;
+            font-family: Arial, Helvetica, sans-serif;
+            background: #f4f6f8;
+            color: #1f2937;
         }
 
         .container {
             width: 100%;
-            max-width: 700px;
+            max-width: 760px;
             margin: 0 auto;
+            padding: 20px;
+        }
+
+        .topbar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
         }
 
         .back {
-            display: inline-block;
-            margin-bottom: 20px;
             text-decoration: none;
             color: #2563eb;
-            font-weight: 600;
+            font-weight: bold;
         }
 
-        .back:hover {
-            text-decoration: underline;
+        h1 {
+            margin: 0;
+            font-size: 25px;
         }
 
         .card {
             background: #ffffff;
-            padding: 22px;
             border-radius: 14px;
-            margin-bottom: 20px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+            padding: 20px;
+            margin-bottom: 18px;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.06);
         }
 
-        h1 {
-            margin-top: 0;
-            margin-bottom: 10px;
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
         }
 
-        h2 {
-            margin-top: 0;
-        }
-
-        .unit-info {
-            line-height: 1.9;
-        }
-
-        .unit-info strong {
-            color: #111827;
-        }
-
-        .transfer-badge {
-            display: inline-block;
-            padding: 7px 12px;
-            border-radius: 999px;
-            background: #dcfce7;
-            color: #166534;
-            font-weight: bold;
-            font-size: 14px;
-            margin-top: 10px;
-        }
-
-        #reader {
-            width: 100%;
-            margin-top: 15px;
-            overflow: hidden;
-            border-radius: 12px;
-        }
-
-        #reader video {
-            width: 100% !important;
-            height: auto !important;
-            border-radius: 12px;
-        }
-
-        .start-button {
-            width: 100%;
-            padding: 14px;
-            border: none;
-            border-radius: 9px;
-            background: #2563eb;
-            color: white;
-            font-size: 16px;
-            font-weight: bold;
-            cursor: pointer;
-        }
-
-        .start-button:hover {
-            background: #1d4ed8;
-        }
-
-        .start-button:disabled {
-            background: #9ca3af;
-            cursor: not-allowed;
-        }
-
-        .stop-button {
-            width: 100%;
-            padding: 12px;
-            border: none;
-            border-radius: 9px;
-            background: #dc2626;
-            color: white;
-            font-size: 15px;
-            font-weight: bold;
-            cursor: pointer;
-            margin-top: 10px;
-            display: none;
-        }
-
-        .stop-button:hover {
-            background: #b91c1c;
-        }
-
-        .result {
-            display: none;
-            margin-top: 18px;
-            padding: 15px;
+        .info {
+            background: #f8fafc;
+            padding: 13px;
             border-radius: 10px;
-            line-height: 1.6;
         }
 
-        .result.info {
-            display: block;
-            background: #dbeafe;
-            color: #1e40af;
+        .label {
+            font-size: 13px;
+            color: #64748b;
+            margin-bottom: 5px;
         }
 
-        .result.success {
-            display: block;
-            background: #dcfce7;
-            color: #166534;
+        .value {
+            font-weight: bold;
+            word-break: break-word;
         }
 
-        .result.error {
-            display: block;
-            background: #fee2e2;
-            color: #991b1b;
-        }
-
-        .result.warning {
-            display: block;
+        .status {
+            display: inline-block;
+            padding: 6px 10px;
+            border-radius: 999px;
+            font-size: 13px;
+            font-weight: bold;
             background: #fef3c7;
             color: #92400e;
         }
 
-        .camera-select-wrapper {
-            margin-top: 15px;
-            display: none;
+        #reader {
+            width: 100%;
+            max-width: 500px;
+            margin: 0 auto;
+            overflow: hidden;
+            border-radius: 12px;
         }
 
-        .camera-select-wrapper label {
+        .scanner-title {
+            margin-top: 0;
+            margin-bottom: 8px;
+        }
+
+        .scanner-info {
+            margin-top: 0;
+            color: #64748b;
+            font-size: 14px;
+        }
+
+        .manual {
+            margin-top: 20px;
+            border-top: 1px solid #e5e7eb;
+            padding-top: 20px;
+        }
+
+        label {
             display: block;
+            font-weight: bold;
             margin-bottom: 7px;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 13px;
+            border: 1px solid #d1d5db;
+            border-radius: 9px;
+            font-size: 16px;
+            outline: none;
+        }
+
+        input[type="text"]:focus {
+            border-color: #2563eb;
+        }
+
+        button {
+            border: 0;
+            cursor: pointer;
+            border-radius: 9px;
+            padding: 12px 16px;
+            font-size: 15px;
             font-weight: bold;
         }
 
-        .camera-select {
+        .btn-primary {
             width: 100%;
-            padding: 11px;
-            border: 1px solid #d1d5db;
-            border-radius: 8px;
-            background: white;
-            font-size: 15px;
+            background: #2563eb;
+            color: white;
+            margin-top: 10px;
         }
 
-        .note {
-            margin-top: 15px;
+        .btn-primary:hover {
+            background: #1d4ed8;
+        }
+
+        .alert {
+            padding: 13px 15px;
+            border-radius: 9px;
+            margin-bottom: 18px;
+            font-size: 14px;
+        }
+
+        .alert-error {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .alert-success {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .warning {
+            background: #fff7ed;
+            border: 1px solid #fed7aa;
+            color: #9a3412;
             padding: 13px;
             border-radius: 9px;
-            background: #f3f4f6;
-            color: #4b5563;
+            margin-top: 15px;
             font-size: 14px;
-            line-height: 1.6;
+        }
+
+        .flow {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 15px;
+        }
+
+        .flow-item {
+            padding: 8px 12px;
+            border-radius: 8px;
+            background: #f1f5f9;
+            font-size: 13px;
+            font-weight: bold;
+        }
+
+        .arrow {
+            color: #64748b;
+            font-weight: bold;
         }
 
         @media (max-width: 600px) {
 
-            body {
-                padding: 12px;
-            }
-
-            .card {
-                padding: 17px;
+            .container {
+                padding: 14px;
             }
 
             h1 {
-                font-size: 25px;
+                font-size: 21px;
             }
 
+            .info-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .card {
+                padding: 16px;
+            }
         }
-
     </style>
-
 </head>
 
 <body>
 
 <div class="container">
 
-    <a
-        href="transfer.php"
-        class="back"
-    >
-        ← Kembali ke Transfer
-    </a>
+    <div class="topbar">
+        <a href="transfer.php" class="back">
+            ← Kembali
+        </a>
 
+        <h1>Scan Transfer Unit</h1>
+    </div>
 
-    <!-- INFORMASI TRANSFER -->
+    <?php if ($error): ?>
+        <div class="alert alert-error">
+            <?= htmlspecialchars($error) ?>
+        </div>
+    <?php endif; ?>
+
+    <?php if ($success): ?>
+        <div class="alert alert-success">
+            <?= htmlspecialchars($success) ?>
+        </div>
+    <?php endif; ?>
 
     <div class="card">
 
-        <h1>Scan QR Unit</h1>
+        <h2 style="margin-top:0;">
+            Detail Transfer
+        </h2>
 
-        <p>
-            Scan QR unit fisik untuk menyelesaikan transfer.
-        </p>
+        <div class="info-grid">
 
-        <div class="unit-info">
+            <div class="info">
+                <div class="label">
+                    Kode Unit
+                </div>
 
-            <strong>
-                Unit yang akan diterima:
-            </strong>
+                <div class="value">
+                    <?= htmlspecialchars($transfer['kode_unit']) ?>
+                </div>
+            </div>
 
-            <br>
+            <div class="info">
+                <div class="label">
+                    Nama Unit
+                </div>
 
-            Kode:
-            <strong>
-                <?= htmlspecialchars(
-                    $transfer["kode_unit"],
-                    ENT_QUOTES,
-                    "UTF-8"
-                ) ?>
-            </strong>
+                <div class="value">
+                    <?= htmlspecialchars($transfer['nama_unit']) ?>
+                </div>
+            </div>
 
-            <br>
+            <div class="info">
+                <div class="label">
+                    Kategori
+                </div>
 
-            Nama:
-            <?= htmlspecialchars(
-                $transfer["nama_unit"],
-                ENT_QUOTES,
-                "UTF-8"
-            ) ?>
+                <div class="value">
+                    <?= htmlspecialchars($transfer['kategori']) ?>
+                </div>
+            </div>
 
-            <br>
+            <div class="info">
+                <div class="label">
+                    Jumlah
+                </div>
 
-            Kategori:
-            <?= htmlspecialchars(
-                $transfer["kategori"],
-                ENT_QUOTES,
-                "UTF-8"
-            ) ?>
+                <div class="value">
+                    <?= (int) $transfer['jumlah'] ?>
+                </div>
+            </div>
 
-            <br>
+            <div class="info">
+                <div class="label">
+                    Cabang Asal
+                </div>
 
-            Dari:
-            <?= htmlspecialchars(
-                $transfer["dari_cabang"],
-                ENT_QUOTES,
-                "UTF-8"
-            ) ?>
+                <div class="value">
+                    <?= htmlspecialchars($transfer['from_branch_name']) ?>
+                </div>
+            </div>
 
-            <br>
+            <div class="info">
+                <div class="label">
+                    Cabang Tujuan
+                </div>
 
-            Ke:
-            <?= htmlspecialchars(
-                $transfer["ke_cabang"],
-                ENT_QUOTES,
-                "UTF-8"
-            ) ?>
+                <div class="value">
+                    <?= htmlspecialchars($transfer['to_branch_name']) ?>
+                </div>
+            </div>
 
-            <br>
+            <div class="info">
+                <div class="label">
+                    Status Transfer
+                </div>
 
-            <span class="transfer-badge">
-                APPROVED
-            </span>
+                <div>
+                    <span class="status">
+                        <?= htmlspecialchars($transfer['status']) ?>
+                    </span>
+                </div>
+            </div>
 
+            <div class="info">
+                <div class="label">
+                    Status Unit
+                </div>
+
+                <div class="value">
+                    <?= htmlspecialchars($transfer['unit_status']) ?>
+                </div>
+            </div>
+
+        </div>
+
+        <div class="flow">
+            <div class="flow-item">
+                PENDING
+            </div>
+
+            <div class="arrow">
+                →
+            </div>
+
+            <div class="flow-item">
+                SIAP DIKONFIRMASI
+            </div>
+
+            <div class="arrow">
+                →
+            </div>
+
+            <div class="flow-item">
+                COMPLETED
+            </div>
         </div>
 
     </div>
 
+    <?php if ($transfer['status'] === 'PENDING'): ?>
 
-    <!-- SCANNER -->
+        <div class="card">
 
-    <div class="card">
+            <h2 class="scanner-title">
+                Scan QR Unit
+            </h2>
 
-        <h2>Scanner</h2>
+            <p class="scanner-info">
+                Arahkan kamera ke QR unit yang akan ditransfer.
+                QR harus berisi kode unit yang sesuai.
+            </p>
 
-        <button
-            type="button"
-            id="startButton"
-            class="start-button"
-            onclick="mulaiScanner()"
-        >
-            📷 Mulai Kamera
-        </button>
+            <div id="reader"></div>
 
+            <div class="manual">
 
-        <button
-            type="button"
-            id="stopButton"
-            class="stop-button"
-            onclick="hentikanScanner()"
-        >
-            ⛔ Hentikan Kamera
-        </button>
+                <h3 style="margin-top:0;">
+                    Input Manual
+                </h3>
 
+                <p class="scanner-info">
+                    Kalau kamera bermasalah, masukkan kode unit secara manual.
+                </p>
 
-        <div
-            id="cameraSelectWrapper"
-            class="camera-select-wrapper"
-        >
+                <form method="POST" id="transferForm">
 
-            <label for="cameraSelect">
-                Pilih Kamera
-            </label>
+                    <input
+                        type="hidden"
+                        name="action"
+                        value="scan_transfer"
+                    >
 
-            <select
-                id="cameraSelect"
-                class="camera-select"
-                onchange="gantiKamera()"
-            >
-            </select>
+                    <input
+                        type="hidden"
+                        name="transfer_id"
+                        value="<?= $transfer_id ?>"
+                    >
 
-        </div>
+                    <input
+                        type="hidden"
+                        name="csrf_token"
+                        value="<?= htmlspecialchars(csrf_token()) ?>"
+                    >
 
+                    <label for="kode_unit">
+                        Kode Unit
+                    </label>
 
-        <div id="reader"></div>
+                    <input
+                        type="text"
+                        id="kode_unit"
+                        name="kode_unit"
+                        placeholder="Contoh: A1"
+                        autocomplete="off"
+                        required
+                    >
 
+                    <button
+                        type="submit"
+                        class="btn-primary"
+                    >
+                        Konfirmasi Scan
+                    </button>
 
-        <div
-            id="result"
-            class="result"
-        ></div>
+                </form>
 
+            </div>
 
-        <div class="note">
-
-            <strong>Cara menggunakan:</strong>
-
-            <br>
-
-            1. Klik <strong>Mulai Kamera</strong>.
-
-            <br>
-
-            2. Izinkan browser menggunakan kamera.
-
-            <br>
-
-            3. Arahkan kamera ke QR unit.
-
-            <br>
-
-            4. Pastikan QR tersebut adalah QR permanen dari
-
-            <strong>
-                <?= htmlspecialchars(
-                    $transfer["kode_unit"],
-                    ENT_QUOTES,
-                    "UTF-8"
-                ) ?>
-            </strong>.
+            <div class="warning">
+                <strong>Perhatian:</strong>
+                Setelah scan berhasil, unit belum berpindah kepemilikan.
+                Cabang tujuan masih harus melakukan konfirmasi.
+            </div>
 
         </div>
 
-    </div>
+    <?php elseif ($transfer['status'] === 'SIAP_DI_KONFIRMASI'): ?>
+
+        <div class="card">
+
+            <div class="alert alert-success" style="margin-bottom:0;">
+                Unit sudah berhasil discan dan sekarang menunggu
+                konfirmasi dari cabang tujuan.
+            </div>
+
+        </div>
+
+    <?php else: ?>
+
+        <div class="card">
+
+            <div class="alert alert-error" style="margin-bottom:0;">
+                Transfer ini tidak dapat melakukan scan lagi.
+            </div>
+
+        </div>
+
+    <?php endif; ?>
 
 </div>
 
-
 <script>
 
-/*
-|--------------------------------------------------------------------------
-| DATA TRANSFER
-|--------------------------------------------------------------------------
-*/
+let scannerLocked = false;
 
-const transferId =
-    <?= json_encode($transfer_id) ?>;
+function submitScan(kodeUnit) {
 
-
-/*
-|--------------------------------------------------------------------------
-| CSRF TOKEN
-|--------------------------------------------------------------------------
-*/
-
-const csrfToken =
-    <?= json_encode(csrf_token()) ?>;
-
-
-/*
-|--------------------------------------------------------------------------
-| VARIABLE SCANNER
-|--------------------------------------------------------------------------
-*/
-
-let scanner = null;
-
-let scannerAktif = false;
-
-let sedangMemproses = false;
-
-let daftarKamera = [];
-
-
-/*
-|--------------------------------------------------------------------------
-| ELEMENT
-|--------------------------------------------------------------------------
-*/
-
-const startButton =
-    document.getElementById("startButton");
-
-const stopButton =
-    document.getElementById("stopButton");
-
-const result =
-    document.getElementById("result");
-
-const cameraSelectWrapper =
-    document.getElementById("cameraSelectWrapper");
-
-const cameraSelect =
-    document.getElementById("cameraSelect");
-
-
-/*
-|--------------------------------------------------------------------------
-| TAMPILKAN PESAN
-|--------------------------------------------------------------------------
-*/
-
-function tampilkanPesan(pesan, tipe) {
-
-    result.style.display = "block";
-
-    result.className =
-        "result " + tipe;
-
-    result.innerHTML = pesan;
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| AMBIL DAFTAR KAMERA
-|--------------------------------------------------------------------------
-*/
-
-async function ambilDaftarKamera() {
-
-    try {
-
-        daftarKamera =
-            await Html5Qrcode.getCameras();
-
-
-        if (
-            !daftarKamera ||
-            daftarKamera.length === 0
-        ) {
-
-            throw new Error(
-                "Tidak ada kamera yang terdeteksi."
-            );
-        }
-
-
-        cameraSelect.innerHTML = "";
-
-
-        daftarKamera.forEach(
-            (kamera, index) => {
-
-                const option =
-                    document.createElement("option");
-
-                option.value =
-                    kamera.id;
-
-                option.textContent =
-                    kamera.label ||
-                    `Kamera ${index + 1}`;
-
-                cameraSelect.appendChild(option);
-            }
-        );
-
-
-        /*
-        | Cari kamera belakang
-        */
-
-        const kameraBelakang =
-            daftarKamera.find(
-                kamera =>
-                    /back|rear|environment|belakang/i
-                    .test(kamera.label)
-            );
-
-
-        if (kameraBelakang) {
-
-            cameraSelect.value =
-                kameraBelakang.id;
-        }
-
-
-        cameraSelectWrapper.style.display =
-            daftarKamera.length > 1
-                ? "block"
-                : "none";
-
-
-        return true;
-
-    }
-    catch (error) {
-
-        console.error(
-            "Gagal mendapatkan daftar kamera:",
-            error
-        );
-
-
-        const detail =
-            error && error.message
-                ? error.message
-                : String(error);
-
-
-        tampilkanPesan(
-            "Kamera tidak dapat ditemukan." +
-            "<br><br>" +
-            "<strong>Detail:</strong> " +
-            detail +
-            "<br><br>" +
-            "Pastikan browser memiliki izin menggunakan kamera.",
-            "error"
-        );
-
-
-        return false;
-    }
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| MULAI SCANNER
-|--------------------------------------------------------------------------
-*/
-
-async function mulaiScanner() {
-
-    if (scannerAktif) {
+    if (scannerLocked) {
         return;
     }
 
+    scannerLocked = true;
 
-    sedangMemproses = false;
+    const input = document.getElementById('kode_unit');
 
-
-    startButton.disabled = true;
-
-    startButton.innerText =
-        "⏳ Memeriksa kamera...";
-
-
-    tampilkanPesan(
-        "Memeriksa kamera...",
-        "info"
-    );
-
-
-    try {
-
-        if (!scanner) {
-
-            scanner =
-                new Html5Qrcode("reader");
-        }
-
-
-        const kameraTersedia =
-            await ambilDaftarKamera();
-
-
-        if (!kameraTersedia) {
-
-            startButton.disabled = false;
-
-            startButton.innerText =
-                "📷 Coba Lagi";
-
-            return;
-        }
-
-
-        const cameraId =
-            cameraSelect.value ||
-            daftarKamera[0].id;
-
-
-        await scanner.start(
-
-            cameraId,
-
-            {
-                fps: 10,
-
-                qrbox: {
-                    width: 250,
-                    height: 250
-                },
-
-                aspectRatio: 1.0
-            },
-
-            function (decodedText) {
-
-                if (sedangMemproses) {
-                    return;
-                }
-
-
-                sedangMemproses = true;
-
-
-                prosesScan(decodedText);
-            },
-
-            function (errorMessage) {
-
-                // Abaikan error scan biasa.
-
-            }
-        );
-
-
-        scannerAktif = true;
-
-
-        startButton.style.display =
-            "none";
-
-        stopButton.style.display =
-            "block";
-
-
-        tampilkanPesan(
-            "Kamera aktif. Arahkan kamera ke QR unit.",
-            "info"
-        );
-
+    if (input) {
+        input.value = kodeUnit;
     }
-    catch (error) {
 
-        console.error(
-            "ERROR START CAMERA:",
-            error
-        );
+    const form = document.getElementById('transferForm');
 
-
-        scannerAktif = false;
-
-
-        const detail =
-            error && error.message
-                ? error.message
-                : String(error);
-
-
-        startButton.disabled =
-            false;
-
-        startButton.innerText =
-            "📷 Coba Lagi";
-
-
-        stopButton.style.display =
-            "none";
-
-
-        tampilkanPesan(
-            "Kamera tidak dapat digunakan." +
-            "<br><br>" +
-            "<strong>Detail:</strong> " +
-            detail +
-            "<br><br>" +
-            "Pastikan izin kamera sudah diberikan " +
-            "dan halaman dibuka melalui koneksi yang mendukung kamera.",
-            "error"
-        );
+    if (form) {
+        form.submit();
     }
 }
 
+function onScanSuccess(decodedText) {
 
-/*
-|--------------------------------------------------------------------------
-| HENTIKAN SCANNER
-|--------------------------------------------------------------------------
-*/
+    const kodeUnit = decodedText.trim();
 
-async function hentikanScanner() {
-
-    if (
-        !scanner ||
-        !scannerAktif
-    ) {
+    if (!kodeUnit) {
         return;
     }
 
-
-    try {
-
-        await scanner.stop();
-
-        scanner.clear();
-
-    }
-    catch (error) {
-
-        console.error(
-            "Gagal menghentikan scanner:",
-            error
-        );
-    }
-
-
-    scannerAktif = false;
-
-    sedangMemproses = false;
-
-
-    startButton.style.display =
-        "block";
-
-    startButton.disabled =
-        false;
-
-    startButton.innerText =
-        "📷 Mulai Kamera";
-
-
-    stopButton.style.display =
-        "none";
-
-
-    cameraSelectWrapper.style.display =
-        "none";
-
-
-    tampilkanPesan(
-        "Kamera dihentikan.",
-        "info"
-    );
+    submitScan(kodeUnit);
 }
 
+function onScanFailure(error) {
+    // Tidak perlu menampilkan error terus-menerus
+}
 
-/*
-|--------------------------------------------------------------------------
-| GANTI KAMERA
-|--------------------------------------------------------------------------
-*/
+<?php if ($transfer['status'] === 'PENDING'): ?>
 
-async function gantiKamera() {
+document.addEventListener('DOMContentLoaded', function () {
 
-    if (!scannerAktif) {
-        return;
-    }
+    const scanner = new Html5Qrcode("reader");
 
-
-    try {
-
-        await scanner.stop();
-
-        scannerAktif = false;
-
-        sedangMemproses = false;
-
-
-        const cameraId =
-            cameraSelect.value;
-
-
-        await scanner.start(
-
-            cameraId,
-
-            {
-                fps: 10,
-
-                qrbox: {
-                    width: 250,
-                    height: 250
-                },
-
-                aspectRatio: 1.0
-            },
-
-            function (decodedText) {
-
-                if (sedangMemproses) {
-                    return;
-                }
-
-
-                sedangMemproses = true;
-
-
-                prosesScan(decodedText);
-            },
-
-            function (errorMessage) {
-
-                // Abaikan error scan biasa.
-
+    scanner.start(
+        {
+            facingMode: "environment"
+        },
+        {
+            fps: 10,
+            qrbox: {
+                width: 250,
+                height: 250
             }
-        );
+        },
+        onScanSuccess,
+        onScanFailure
+    ).catch(function (error) {
 
+        console.log("Kamera tidak dapat digunakan:", error);
 
-        scannerAktif = true;
+    });
 
+});
 
-        tampilkanPesan(
-            "Kamera berhasil diganti.",
-            "info"
-        );
-
-    }
-    catch (error) {
-
-        console.error(
-            "Gagal mengganti kamera:",
-            error
-        );
-
-
-        scannerAktif = false;
-
-
-        tampilkanPesan(
-            "Kamera gagal diganti." +
-            "<br><br>" +
-            "<strong>Detail:</strong> " +
-            (
-                error.message ||
-                String(error)
-            ),
-            "error"
-        );
-    }
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| PROSES HASIL SCAN
-|--------------------------------------------------------------------------
-*/
-
-async function prosesScan(decodedText) {
-
-    /*
-    | Hentikan kamera
-    */
-
-    if (
-        scanner &&
-        scannerAktif
-    ) {
-
-        try {
-
-            await scanner.stop();
-
-        }
-        catch (error) {
-
-            console.error(error);
-        }
-    }
-
-
-    scannerAktif = false;
-
-
-    startButton.style.display =
-        "none";
-
-    stopButton.style.display =
-        "none";
-
-
-    tampilkanPesan(
-        "QR berhasil terbaca.<br>" +
-        "Memeriksa data unit...",
-        "info"
-    );
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | Kirim ke server
-    |--------------------------------------------------------------------------
-    */
-
-    try {
-
-        const body =
-            new URLSearchParams();
-
-        body.append(
-            "csrf_token",
-            csrfToken
-        );
-
-        body.append(
-            "transfer_id",
-            transferId
-        );
-
-        body.append(
-            "qr_token",
-            decodedText
-        );
-
-
-        const response =
-            await fetch(
-                "proses-terima-transfer.php",
-                {
-                    method: "POST",
-
-                    headers: {
-                        "Content-Type":
-                            "application/x-www-form-urlencoded"
-                    },
-
-                    body: body.toString()
-                }
-            );
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | Ambil JSON
-        |--------------------------------------------------------------------------
-        */
-
-        const data =
-            await response.json();
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | BERHASIL
-        |--------------------------------------------------------------------------
-        */
-
-        if (
-            response.ok &&
-            data.success
-        ) {
-
-            tampilkanPesan(
-
-                "✅ " +
-                data.message +
-
-                "<br><br>" +
-
-                "<strong>" +
-                "Unit sekarang terdaftar di cabang Anda." +
-                "</strong>" +
-
-                "<br><br>" +
-
-                "<a href='transfer.php'>" +
-                "← Kembali ke Transfer" +
-                "</a>",
-
-                "success"
-            );
-
-
-            return;
-        }
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | GAGAL
-        |--------------------------------------------------------------------------
-        */
-
-        sedangMemproses = false;
-
-
-        const pesan =
-            data.message ||
-            "Transfer gagal diproses.";
-
-
-        tampilkanPesan(
-
-            "❌ " +
-            pesan +
-
-            "<br><br>" +
-
-            "Pastikan QR yang discan adalah QR " +
-            "dari unit yang sedang ditransfer.",
-
-            "error"
-        );
-
-
-        startButton.style.display =
-            "block";
-
-        startButton.disabled =
-            false;
-
-        startButton.innerText =
-            "📷 Scan Lagi";
-
-    }
-    catch (error) {
-
-        console.error(
-            "ERROR PROSES TRANSFER:",
-            error
-        );
-
-
-        sedangMemproses = false;
-
-
-        tampilkanPesan(
-
-            "Terjadi kesalahan saat memproses transfer." +
-            "<br><br>" +
-
-            "Silakan coba lagi.",
-
-            "error"
-        );
-
-
-        startButton.style.display =
-            "block";
-
-        startButton.disabled =
-            false;
-
-        startButton.innerText =
-            "📷 Coba Lagi";
-    }
-}
+<?php endif; ?>
 
 </script>
 
 </body>
-
 </html>

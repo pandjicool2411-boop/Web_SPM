@@ -1,106 +1,63 @@
 <?php
 
-require_once "../config/database.php";
-require_once "../config/auth.php";
-require_once "../config/csrf.php";
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../config/auth.php';
 
-verify_csrf();
+require_login();
 
-$message = "";
-$message_type = "";
-
-// ==========================
-// PROSES TAMBAH CABANG
-// ==========================
-
-if ($_SERVER["REQUEST_METHOD"] === "POST") {
-
-    $nama_cabang = trim($_POST["nama_cabang"] ?? "");
-
-    // Validasi
-    if ($nama_cabang === "") {
-
-        $message = "Nama cabang wajib diisi.";
-        $message_type = "error";
-
-    } elseif (mb_strlen($nama_cabang) > 100) {
-
-        $message = "Nama cabang maksimal 100 karakter.";
-        $message_type = "error";
-
-    } else {
-
-        try {
-
-            // Cek apakah nama cabang sudah ada
-            $check = $pdo->prepare(
-                "SELECT id
-                 FROM branches
-                 WHERE nama_cabang = ?
-                 LIMIT 1"
-            );
-
-            $check->execute([$nama_cabang]);
-
-            if ($check->fetch()) {
-
-                $message = "Cabang tersebut sudah terdaftar.";
-                $message_type = "error";
-
-            } else {
-
-                // Simpan cabang
-                $stmt = $pdo->prepare(
-                    "INSERT INTO branches (nama_cabang)
-                     VALUES (?)"
-                );
-
-                $stmt->execute([$nama_cabang]);
-
-                $message = "Cabang berhasil ditambahkan.";
-                $message_type = "success";
-            }
-
-        } catch (PDOException $e) {
-
-            // Jangan tampilkan detail database ke user
-            error_log(
-                "Gagal menambahkan cabang: " . $e->getMessage()
-            );
-
-            $message = "Terjadi kesalahan saat menambahkan cabang.";
-            $message_type = "error";
-        }
-    }
-}
-
-
-// ==========================
-// AMBIL DATA CABANG
-// ==========================
+$branches = [];
+$error = '';
 
 try {
 
-    $stmt = $pdo->query(
-        "SELECT id, nama_cabang, created_at
-         FROM branches
-         ORDER BY id ASC"
-    );
+    /*
+    |--------------------------------------------------------------------------
+    | Ambil semua cabang
+    |--------------------------------------------------------------------------
+    */
+
+    $stmt = $pdo->query("
+        SELECT
+            b.id,
+            b.nama_cabang,
+            b.created_at,
+
+            COUNT(u.id) AS total_unit,
+
+            SUM(
+                CASE
+                    WHEN u.status = 'TERSEDIA'
+                    THEN 1
+                    ELSE 0
+                END
+            ) AS unit_tersedia,
+
+            SUM(
+                CASE
+                    WHEN u.status = 'DISEWAKAN'
+                    THEN 1
+                    ELSE 0
+                END
+            ) AS unit_disewa
+
+        FROM branches b
+
+        LEFT JOIN units u
+            ON u.owner_branch_id = b.id
+
+        GROUP BY
+            b.id,
+            b.nama_cabang,
+            b.created_at
+
+        ORDER BY b.id ASC
+    ");
 
     $branches = $stmt->fetchAll();
 
 } catch (PDOException $e) {
 
-    error_log(
-        "Gagal mengambil data cabang: " . $e->getMessage()
-    );
-
-    $branches = [];
-
-    if ($message === "") {
-        $message = "Data cabang tidak dapat dimuat.";
-        $message_type = "error";
-    }
+    $error = 'Data cabang tidak dapat ditampilkan.';
 }
 
 ?>
@@ -117,7 +74,7 @@ try {
         content="width=device-width, initial-scale=1.0"
     >
 
-    <title>Manajemen Cabang</title>
+    <title>Daftar Cabang - Sistem Scan Unit</title>
 
     <style>
 
@@ -127,146 +84,238 @@ try {
 
         body {
             margin: 0;
-            font-family: Arial, sans-serif;
+            font-family: Arial, Helvetica, sans-serif;
             background: #f4f6f8;
-            color: #222;
+            color: #1f2937;
         }
 
         .container {
-            width: 90%;
-            max-width: 900px;
-            margin: 40px auto;
+            width: min(1100px, 94%);
+            margin: 30px auto;
         }
 
-        h1 {
-            margin-bottom: 8px;
-        }
+        /*
+        |--------------------------------------------------------------------------
+        | Header
+        |--------------------------------------------------------------------------
+        */
 
-        .subtitle {
-            color: #666;
-            margin-bottom: 30px;
-        }
-
-        .card {
-            background: white;
-            padding: 25px;
-            border-radius: 12px;
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
+        .topbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 15px;
             margin-bottom: 25px;
+            flex-wrap: wrap;
         }
 
-        label {
-            display: block;
-            margin-bottom: 8px;
-            font-weight: bold;
+        .title h1 {
+            margin: 0;
+            font-size: 25px;
         }
 
-        input {
-            width: 100%;
-            padding: 12px;
-            border: 1px solid #ccc;
+        .title p {
+            margin: 6px 0 0;
+            color: #6b7280;
+            font-size: 14px;
+        }
+
+        .back {
+            text-decoration: none;
+            background: #e5e7eb;
+            color: #111827;
+            padding: 10px 15px;
             border-radius: 8px;
-            font-size: 15px;
-            margin-bottom: 15px;
+            font-size: 14px;
         }
 
-        input:focus {
-            outline: none;
-            border-color: #2563eb;
+        .back:hover {
+            background: #d1d5db;
         }
 
-        button {
-            border: none;
-            background: #2563eb;
-            color: white;
-            padding: 12px 20px;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 15px;
-        }
 
-        button:hover {
-            background: #1d4ed8;
-        }
+        /*
+        |--------------------------------------------------------------------------
+        | Info
+        |--------------------------------------------------------------------------
+        */
 
-        .message {
-            padding: 12px 15px;
-            border-radius: 8px;
+        .info {
+            background: #eff6ff;
+            color: #1e40af;
+            border-radius: 10px;
+            padding: 14px 16px;
             margin-bottom: 20px;
+            font-size: 14px;
+            line-height: 1.5;
         }
 
-        .success {
-            background: #dcfce7;
-            color: #166534;
-        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Error
+        |--------------------------------------------------------------------------
+        */
 
         .error {
             background: #fee2e2;
             color: #991b1b;
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-
-        th,
-        td {
-            padding: 13px;
-            border-bottom: 1px solid #ddd;
-            text-align: left;
-        }
-
-        th {
-            background: #f1f5f9;
-        }
-
-        .empty {
-            text-align: center;
-            color: #777;
-            padding: 25px;
-        }
-
-        .user-info {
-            background: #e0f2fe;
-            color: #075985;
-            padding: 12px 15px;
-            border-radius: 8px;
+            padding: 14px 16px;
+            border-radius: 9px;
             margin-bottom: 20px;
         }
 
-        .user-info strong {
-            display: block;
-            margin-bottom: 3px;
+
+        /*
+        |--------------------------------------------------------------------------
+        | Grid
+        |--------------------------------------------------------------------------
+        */
+
+        .branch-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 18px;
         }
 
-        @media (max-width: 600px) {
+
+        /*
+        |--------------------------------------------------------------------------
+        | Card
+        |--------------------------------------------------------------------------
+        */
+
+        .branch-card {
+            background: #ffffff;
+            border-radius: 14px;
+            padding: 20px;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.05);
+            border: 1px solid #e5e7eb;
+        }
+
+        .branch-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .branch-icon {
+            width: 45px;
+            height: 45px;
+            border-radius: 10px;
+            background: #eff6ff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 22px;
+            flex-shrink: 0;
+        }
+
+        .branch-name {
+            flex: 1;
+        }
+
+        .branch-name h2 {
+            margin: 0;
+            font-size: 18px;
+        }
+
+        .branch-id {
+            margin-top: 5px;
+            color: #6b7280;
+            font-size: 12px;
+        }
+
+        .your-branch {
+            background: #dcfce7;
+            color: #166534;
+            padding: 6px 9px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Statistik
+        |--------------------------------------------------------------------------
+        */
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+        }
+
+        .stat {
+            background: #f8fafc;
+            border-radius: 9px;
+            padding: 12px 8px;
+            text-align: center;
+        }
+
+        .stat-number {
+            font-size: 20px;
+            font-weight: bold;
+        }
+
+        .stat-label {
+            margin-top: 4px;
+            color: #6b7280;
+            font-size: 11px;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Footer
+        |--------------------------------------------------------------------------
+        */
+
+        footer {
+            text-align: center;
+            color: #9ca3af;
+            font-size: 12px;
+            padding: 30px 0;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Responsive
+        |--------------------------------------------------------------------------
+        */
+
+        @media (max-width: 700px) {
 
             .container {
-                width: 94%;
                 margin: 20px auto;
             }
 
-            .card {
-                padding: 18px;
+            .branch-grid {
+                grid-template-columns: 1fr;
             }
 
-            table {
-                font-size: 14px;
+            .title h1 {
+                font-size: 22px;
             }
 
-            th,
-            td {
-                padding: 10px 8px;
+        }
+
+        @media (max-width: 450px) {
+
+            .branch-head {
+                flex-wrap: wrap;
             }
 
-            /*
-             * Supaya tabel tetap nyaman
-             * di layar HP
-             */
-            .table-wrapper {
-                overflow-x: auto;
+            .stats {
+                grid-template-columns: 1fr;
             }
+
         }
 
     </style>
@@ -277,143 +326,187 @@ try {
 
 <div class="container">
 
-    <h1>Manajemen Cabang</h1>
 
-    <p class="subtitle">
-        Tambahkan dan lihat daftar cabang yang terdaftar.
-    </p>
+    <!-- HEADER -->
+
+    <div class="topbar">
+
+        <div class="title">
+
+            <h1>
+                🏢 Daftar Cabang
+            </h1>
+
+            <p>
+                Informasi seluruh cabang yang terdaftar
+                pada sistem.
+            </p>
+
+        </div>
 
 
-    <!-- INFORMASI USER -->
-
-    <div class="user-info">
-
-        <strong>
-            Login sebagai:
-            <?= htmlspecialchars($_SESSION["nama"]) ?>
-        </strong>
-
-        Cabang:
-        <?= htmlspecialchars($_SESSION["nama_cabang"] ?? "Tidak diketahui") ?>
+        <a
+            href="dashboard.php"
+            class="back"
+        >
+            ← Dashboard
+        </a>
 
     </div>
 
 
-    <!-- PESAN -->
+    <!-- INFO -->
 
-    <?php if ($message !== ""): ?>
+    <div class="info">
 
-        <div class="message <?= htmlspecialchars($message_type) ?>">
+        Sistem memiliki
+        <strong>4 cabang tetap</strong>.
+        Data cabang tidak dapat ditambah,
+        diubah, atau dihapus melalui halaman ini.
 
-            <?= htmlspecialchars($message) ?>
+    </div>
+
+
+    <!-- ERROR -->
+
+    <?php if ($error): ?>
+
+        <div class="error">
+
+            <?= htmlspecialchars($error) ?>
 
         </div>
 
     <?php endif; ?>
 
 
-    <!-- FORM TAMBAH CABANG -->
+    <!-- CABANG -->
 
-    <div class="card">
+    <?php if (empty($branches)): ?>
 
-        <h2>Tambah Cabang</h2>
+        <div class="branch-card">
 
-        <form method="POST">
+            Belum ada data cabang.
 
-            <?= csrf_field() ?>
+        </div>
 
-            <label for="nama_cabang">
-                Nama Cabang
-            </label>
+    <?php else: ?>
 
-            <input
-                type="text"
-                id="nama_cabang"
-                name="nama_cabang"
-                placeholder="Contoh: Medan Pancing"
-                maxlength="100"
-                autocomplete="off"
-                required
-            >
+        <div class="branch-grid">
 
-            <button type="submit">
-                Tambah Cabang
-            </button>
+            <?php foreach ($branches as $branch): ?>
 
-        </form>
+                <?php
+                    $isOwnBranch =
+                        (int) $branch['id'] ===
+                        (int) user_branch_id();
 
-    </div>
+                    $totalUnit =
+                        (int) ($branch['total_unit'] ?? 0);
+
+                    $unitTersedia =
+                        (int) ($branch['unit_tersedia'] ?? 0);
+
+                    $unitDisewa =
+                        (int) ($branch['unit_disewa'] ?? 0);
+                ?>
+
+                <div class="branch-card">
 
 
-    <!-- DAFTAR CABANG -->
+                    <div class="branch-head">
 
-    <div class="card">
+                        <div class="branch-icon">
+                            🏢
+                        </div>
 
-        <h2>Daftar Cabang</h2>
+                        <div class="branch-name">
 
-        <?php if (count($branches) > 0): ?>
+                            <h2>
+                                <?= htmlspecialchars(
+                                    $branch['nama_cabang']
+                                ) ?>
+                            </h2>
 
-            <div class="table-wrapper">
+                            <div class="branch-id">
 
-                <table>
+                                ID Cabang:
+                                <?= (int) $branch['id'] ?>
 
-                    <thead>
+                            </div>
 
-                        <tr>
+                        </div>
 
-                            <th>ID</th>
 
-                            <th>Nama Cabang</th>
+                        <?php if ($isOwnBranch): ?>
 
-                            <th>Dibuat</th>
+                            <span class="your-branch">
+                                CABANG ANDA
+                            </span>
 
-                        </tr>
+                        <?php endif; ?>
 
-                    </thead>
+                    </div>
 
-                    <tbody>
 
-                        <?php foreach ($branches as $branch): ?>
+                    <div class="stats">
 
-                            <tr>
 
-                                <td>
-                                    <?= htmlspecialchars(
-                                        (string) $branch["id"]
-                                    ) ?>
-                                </td>
+                        <div class="stat">
 
-                                <td>
-                                    <?= htmlspecialchars(
-                                        $branch["nama_cabang"]
-                                    ) ?>
-                                </td>
+                            <div class="stat-number">
+                                <?= $totalUnit ?>
+                            </div>
 
-                                <td>
-                                    <?= htmlspecialchars(
-                                        $branch["created_at"]
-                                    ) ?>
-                                </td>
+                            <div class="stat-label">
+                                Total Unit
+                            </div>
 
-                            </tr>
+                        </div>
 
-                        <?php endforeach; ?>
 
-                    </tbody>
+                        <div class="stat">
 
-                </table>
+                            <div class="stat-number">
+                                <?= $unitTersedia ?>
+                            </div>
 
-            </div>
+                            <div class="stat-label">
+                                Tersedia
+                            </div>
 
-        <?php else: ?>
+                        </div>
 
-            <div class="empty">
-                Belum ada cabang yang terdaftar.
-            </div>
 
-        <?php endif; ?>
+                        <div class="stat">
 
-    </div>
+                            <div class="stat-number">
+                                <?= $unitDisewa ?>
+                            </div>
+
+                            <div class="stat-label">
+                                Disewa
+                            </div>
+
+                        </div>
+
+
+                    </div>
+
+                </div>
+
+            <?php endforeach; ?>
+
+        </div>
+
+    <?php endif; ?>
+
+
+    <footer>
+
+        Sistem Scan Unit V2
+
+    </footer>
 
 </div>
 

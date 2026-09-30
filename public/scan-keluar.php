@@ -1,12 +1,280 @@
 <?php
 
-require_once "../config/auth.php";
-require_once "../config/database.php";
-require_once "../config/csrf.php";
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../config/auth.php';
+require_once __DIR__ . '/../config/csrf.php';
+
+require_login();
+
+$branchId = user_branch_id();
+
+if (!isset($_SESSION['scan_keluar_units'])) {
+    $_SESSION['scan_keluar_units'] = [];
+}
+
+$success = '';
+$error = '';
+
+/*
+|--------------------------------------------------------------------------
+| PESAN DARI PROSES KELUAR
+|--------------------------------------------------------------------------
+*/
+
+if (isset($_GET['success'])) {
+
+    $success = 'Unit berhasil disewakan.';
+
+    if (isset($_GET['rental_id'])) {
+        $success .=
+            ' ID transaksi: #' .
+            htmlspecialchars($_GET['rental_id']);
+    }
+}
+
+if (isset($_SESSION['scan_keluar_error'])) {
+
+    $error = $_SESSION['scan_keluar_error'];
+
+    unset($_SESSION['scan_keluar_error']);
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| PROSES POST
+|--------------------------------------------------------------------------
+*/
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+
+    $action = $_POST['action'] ?? '';
+    $token  = $_POST['csrf_token'] ?? '';
+
+    if (!verify_csrf($token)) {
+
+        $error =
+            'Token keamanan tidak valid. Silakan coba lagi.';
+
+    } else {
+
+        /*
+        |--------------------------------------------------------------------------
+        | SCAN UNIT
+        |--------------------------------------------------------------------------
+        */
+
+        if ($action === 'scan') {
+
+            $kodeUnit = trim(
+                $_POST['kode_unit'] ?? ''
+            );
+
+            if ($kodeUnit === '') {
+
+                $error =
+                    'Kode unit tidak boleh kosong.';
+
+            } else {
+
+                try {
+
+                    $stmt = $pdo->prepare("
+                        SELECT
+                            u.id,
+                            u.kode_unit,
+                            u.nama_unit,
+                            u.kategori,
+                            u.jumlah,
+                            u.owner_branch_id,
+                            u.status,
+                            b.nama_cabang
+
+                        FROM units u
+
+                        INNER JOIN branches b
+                            ON b.id = u.owner_branch_id
+
+                        WHERE u.kode_unit = ?
+
+                        LIMIT 1
+                    ");
+
+                    $stmt->execute([
+                        $kodeUnit
+                    ]);
+
+                    $unit = $stmt->fetch();
+
+
+                    if (!$unit) {
+
+                        $error =
+                            'Unit dengan kode "' .
+                            htmlspecialchars($kodeUnit) .
+                            '" tidak ditemukan.';
+
+                    } elseif (
+                        (int)$unit['owner_branch_id']
+                        !==
+                        (int)$branchId
+                    ) {
+
+                        $error =
+                            'Unit "' .
+                            htmlspecialchars($kodeUnit) .
+                            '" bukan milik cabang Anda.';
+
+                    } elseif (
+                        $unit['status'] !== 'TERSEDIA'
+                    ) {
+
+                        $error =
+                            'Unit "' .
+                            htmlspecialchars($kodeUnit) .
+                            '" sedang disewakan.';
+
+                    } else {
+
+                        $alreadyScanned = false;
+
+                        foreach (
+                            $_SESSION['scan_keluar_units']
+                            as $scannedUnit
+                        ) {
+
+                            if (
+                                (int)$scannedUnit['id']
+                                ===
+                                (int)$unit['id']
+                            ) {
+
+                                $alreadyScanned = true;
+
+                                break;
+                            }
+                        }
+
+
+                        if ($alreadyScanned) {
+
+                            $error =
+                                'Unit "' .
+                                htmlspecialchars($kodeUnit) .
+                                '" sudah ada di daftar scan.';
+
+                        } else {
+
+                            $_SESSION[
+                                'scan_keluar_units'
+                            ][] = [
+
+                                'id' =>
+                                    (int)$unit['id'],
+
+                                'kode_unit' =>
+                                    $unit['kode_unit'],
+
+                                'nama_unit' =>
+                                    $unit['nama_unit'],
+
+                                'kategori' =>
+                                    $unit['kategori'],
+
+                                'jumlah' =>
+                                    (int)$unit['jumlah']
+                            ];
+
+
+                            $success =
+                                'Unit "' .
+                                htmlspecialchars($kodeUnit) .
+                                '" berhasil ditambahkan.';
+                        }
+                    }
+
+                } catch (PDOException $e) {
+
+                    $error =
+                        'Terjadi kesalahan saat memproses unit.';
+                }
+            }
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | HAPUS UNIT
+        |--------------------------------------------------------------------------
+        */
+
+        elseif ($action === 'remove') {
+
+            $unitId =
+                (int)($_POST['unit_id'] ?? 0);
+
+            if ($unitId > 0) {
+
+                $newList = [];
+
+                foreach (
+                    $_SESSION['scan_keluar_units']
+                    as $scannedUnit
+                ) {
+
+                    if (
+                        (int)$scannedUnit['id']
+                        !==
+                        $unitId
+                    ) {
+
+                        $newList[] =
+                            $scannedUnit;
+                    }
+                }
+
+                $_SESSION[
+                    'scan_keluar_units'
+                ] = $newList;
+            }
+
+            header(
+                'Location: scan-keluar.php'
+            );
+
+            exit;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | KOSONGKAN SEMUA
+        |--------------------------------------------------------------------------
+        */
+
+        elseif ($action === 'clear') {
+
+            $_SESSION[
+                'scan_keluar_units'
+            ] = [];
+
+            header(
+                'Location: scan-keluar.php'
+            );
+
+            exit;
+        }
+    }
+}
+
+
+$scannedUnits =
+    $_SESSION['scan_keluar_units'];
 
 ?>
 
 <!DOCTYPE html>
+
 <html lang="id">
 
 <head>
@@ -18,911 +286,1454 @@ require_once "../config/csrf.php";
         content="width=device-width, initial-scale=1.0"
     >
 
-    <title>Scan Unit Keluar - Sistem Scan Unit</title>
+    <title>Scan Unit Keluar</title>
 
-    <script src="https://unpkg.com/html5-qrcode"></script>
+
+    <script
+        src="https://unpkg.com/html5-qrcode"
+        type="text/javascript"
+    ></script>
+
 
     <style>
+
+        /*
+        |--------------------------------------------------------------------------
+        | RESET
+        |--------------------------------------------------------------------------
+        */
 
         * {
             box-sizing: border-box;
         }
 
+
+        html {
+            width: 100%;
+            overflow-x: hidden;
+        }
+
+
         body {
             margin: 0;
+            width: 100%;
+            min-height: 100vh;
 
             font-family:
                 Arial,
                 Helvetica,
                 sans-serif;
 
-            background: #f5f7fb;
+            background: #f3f4f6;
             color: #111827;
+
+            overflow-x: hidden;
         }
 
+
+        /*
+        |--------------------------------------------------------------------------
+        | CONTAINER
+        |--------------------------------------------------------------------------
+        */
+
         .container {
-            width: 92%;
-            max-width: 760px;
+
+            width: 100%;
+            max-width: 1050px;
 
             margin: 0 auto;
 
-            padding: 30px 0 50px;
+            padding:
+                24px
+                20px
+                50px;
         }
 
-        /* =========================
-           BACK
-        ========================= */
 
-        .back {
-            display: inline-flex;
-            align-items: center;
-            gap: 7px;
+        /*
+        |--------------------------------------------------------------------------
+        | TOPBAR
+        |--------------------------------------------------------------------------
+        */
 
-            margin-bottom: 25px;
+        .topbar {
 
-            color: #2563eb;
-
-            text-decoration: none;
-
-            font-size: 14px;
-            font-weight: 600;
-        }
-
-        .back:hover {
-            text-decoration: underline;
-        }
-
-        /* =========================
-           HEADER
-        ========================= */
-
-        .header {
-            margin-bottom: 20px;
-        }
-
-        .header h1 {
-            margin: 0 0 7px;
-
-            font-size: 30px;
-
-            letter-spacing: -0.5px;
-        }
-
-        .header p {
-            margin: 0;
-
-            color: #6b7280;
-
-            font-size: 15px;
-
-            line-height: 1.6;
-        }
-
-        /* =========================
-           MAIN CARD
-        ========================= */
-
-        .card {
-            background: #ffffff;
-
-            border: 1px solid #e5e7eb;
-
-            border-radius: 18px;
-
-            padding: 25px;
-
-            box-shadow:
-                0 6px 20px
-                rgba(15, 23, 42, 0.05);
-        }
-
-        /* =========================
-           SECTION HEADER
-        ========================= */
-
-        .section-header {
             display: flex;
 
-            align-items: center;
+            justify-content:
+                space-between;
 
-            justify-content: space-between;
+            align-items: center;
 
             gap: 15px;
 
-            margin-bottom: 15px;
+            margin-bottom: 20px;
         }
 
-        .section-header h2 {
+
+        .page-title h1 {
+
             margin: 0;
 
-            font-size: 18px;
+            font-size: 27px;
+            line-height: 1.2;
         }
 
-        .scanner-status {
-            display: inline-flex;
 
-            align-items: center;
+        .page-title p {
 
-            gap: 6px;
-
-            padding: 6px 10px;
-
-            border-radius: 999px;
-
-            background: #eff6ff;
-
-            color: #1d4ed8;
-
-            font-size: 12px;
-
-            font-weight: 700;
-
-            white-space: nowrap;
-        }
-
-        .status-dot {
-            width: 7px;
-            height: 7px;
-
-            border-radius: 50%;
-
-            background: #2563eb;
-        }
-
-        /* =========================
-           SCANNER
-        ========================= */
-
-        .scanner-wrapper {
-            padding: 10px;
-
-            background: #f8fafc;
-
-            border: 1px solid #e5e7eb;
-
-            border-radius: 15px;
-
-            overflow: hidden;
-        }
-
-        #reader {
-            width: 100%;
-
-            max-width: 500px;
-
-            margin: 0 auto;
-        }
-
-        #reader video {
-            width: 100% !important;
-
-            border-radius: 10px;
-        }
-
-        #reader img {
-            max-width: 100%;
-        }
-
-        #reader__dashboard {
-            padding-top: 10px !important;
-        }
-
-        #reader__dashboard button {
-            border: none !important;
-
-            border-radius: 8px !important;
-
-            padding: 9px 14px !important;
-
-            background: #2563eb !important;
-
-            color: #ffffff !important;
-
-            font-weight: 600;
-
-            cursor: pointer;
-        }
-
-        #reader__dashboard button:hover {
-            background: #1d4ed8 !important;
-        }
-
-        #reader__status_span {
-            font-size: 13px !important;
-        }
-
-        .scanner-hint {
-            margin-top: 12px;
+            margin: 7px 0 0;
 
             color: #6b7280;
-
-            text-align: center;
-
-            font-size: 13px;
-
-            line-height: 1.5;
-        }
-
-        /* =========================
-           ERROR
-        ========================= */
-
-        .error {
-            display: none;
-
-            margin-top: 18px;
-
-            padding: 14px 16px;
-
-            background: #fef2f2;
-
-            border: 1px solid #fecaca;
-
-            border-radius: 11px;
-
-            color: #991b1b;
 
             font-size: 14px;
-
-            line-height: 1.5;
         }
 
-        /* =========================
-           UNIT INFO
-        ========================= */
 
-        .unit-info {
-            display: none;
+        .back-btn {
 
-            margin-top: 25px;
-
-            border: 1px solid #e5e7eb;
-
-            border-radius: 15px;
-
-            overflow: hidden;
-
-            background: #ffffff;
-        }
-
-        .unit-header {
-            padding: 18px 20px;
-
-            background: #f8fafc;
-
-            border-bottom: 1px solid #e5e7eb;
-        }
-
-        .unit-header h2 {
-            margin: 0 0 5px;
-
-            font-size: 18px;
-        }
-
-        .unit-header p {
-            margin: 0;
-
-            color: #6b7280;
-
-            font-size: 13px;
-        }
-
-        .unit-body {
-            padding: 5px 20px 20px;
-        }
-
-        .row {
-            padding: 14px 0;
-
-            border-bottom: 1px solid #e5e7eb;
-        }
-
-        .row:last-child {
-            border-bottom: none;
-        }
-
-        .label {
-            margin-bottom: 5px;
-
-            color: #6b7280;
-
-            font-size: 12px;
-
-            font-weight: 600;
-
-            text-transform: uppercase;
-
-            letter-spacing: 0.3px;
-        }
-
-        .value {
-            color: #111827;
-
-            font-size: 15px;
-
-            font-weight: 600;
-
-            line-height: 1.4;
-        }
-
-        /* =========================
-           UNIT STATUS
-        ========================= */
-
-        .unit-status {
             display: inline-flex;
 
             align-items: center;
 
             justify-content: center;
 
-            padding: 7px 12px;
+            text-decoration: none;
 
-            border-radius: 999px;
+            background: #374151;
 
-            font-size: 12px;
+            color: white;
 
-            font-weight: 700;
+            padding:
+                10px
+                15px;
+
+            border-radius: 9px;
+
+            font-size: 14px;
+
+            white-space: nowrap;
         }
 
-        .unit-status.tersedia {
-            background: #dcfce7;
 
-            color: #166534;
+        .back-btn:hover {
+            background: #1f2937;
         }
 
-        .unit-status.disewakan {
-            background: #fee2e2;
 
-            color: #991b1b;
+        /*
+        |--------------------------------------------------------------------------
+        | CARD
+        |--------------------------------------------------------------------------
+        */
+
+        .card {
+
+            width: 100%;
+
+            background: white;
+
+            border-radius: 14px;
+
+            padding: 22px;
+
+            margin-bottom: 18px;
+
+            box-shadow:
+                0 3px 14px
+                rgba(0, 0, 0, 0.05);
         }
 
-        /* =========================
-           FORM
-        ========================= */
 
-        .form-area {
-            display: none;
+        .card h2 {
 
-            margin-top: 25px;
+            margin:
+                0 0 8px;
 
-            padding-top: 25px;
-
-            border-top: 1px solid #e5e7eb;
+            font-size: 19px;
         }
 
-        .form-title {
+
+        /*
+        |--------------------------------------------------------------------------
+        | CABANG
+        |--------------------------------------------------------------------------
+        */
+
+        .branch-name {
+
+            font-size: 20px;
+
+            font-weight: bold;
+
             margin-bottom: 5px;
-
-            font-size: 18px;
-
-            font-weight: 700;
         }
 
-        .form-description {
-            margin: 0 0 17px;
+
+        .branch-description {
 
             color: #6b7280;
 
-            font-size: 13px;
+            font-size: 14px;
 
             line-height: 1.5;
         }
 
-        .form-group {
-            margin-bottom: 15px;
-        }
 
-        label {
-            display: block;
+        /*
+        |--------------------------------------------------------------------------
+        | MESSAGE
+        |--------------------------------------------------------------------------
+        */
 
-            margin-bottom: 7px;
+        .message {
 
-            color: #374151;
+            width: 100%;
+
+            padding:
+                13px
+                15px;
+
+            border-radius: 9px;
+
+            margin-bottom: 18px;
 
             font-size: 14px;
 
-            font-weight: 700;
+            line-height: 1.5;
         }
 
-        .input-wrapper {
-            position: relative;
+
+        .message.success {
+
+            background: #dcfce7;
+
+            color: #166534;
+
+            border:
+                1px solid
+                #bbf7d0;
         }
 
-        input {
+
+        .message.error {
+
+            background: #fee2e2;
+
+            color: #991b1b;
+
+            border:
+                1px solid
+                #fecaca;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | SCANNER
+        |--------------------------------------------------------------------------
+        */
+
+        .scanner-card {
+
             width: 100%;
 
-            padding: 13px 14px;
+            background: white;
 
-            border: 1px solid #d1d5db;
+            border-radius: 14px;
 
-            border-radius: 10px;
+            padding: 22px;
 
-            background: #ffffff;
+            margin-bottom: 18px;
 
-            color: #111827;
-
-            font-size: 18px;
-
-            letter-spacing: 3px;
-
-            outline: none;
-
-            transition:
-                border-color 0.2s ease,
-                box-shadow 0.2s ease;
+            box-shadow:
+                0 3px 14px
+                rgba(0, 0, 0, 0.05);
         }
 
-        input:focus {
+
+        .scanner-description {
+
+            margin:
+                0 0 18px;
+
+            color: #6b7280;
+
+            font-size: 14px;
+
+            line-height: 1.5;
+        }
+
+
+        #reader {
+
+            width: 100%;
+
+            max-width: 520px;
+
+            margin:
+                0 auto
+                20px;
+        }
+
+
+        #reader video {
+
+            width: 100% !important;
+
+            max-width: 100% !important;
+
+            border-radius: 12px;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | MANUAL INPUT
+        |--------------------------------------------------------------------------
+        */
+
+        .manual-title {
+
+            margin:
+                10px 0 8px;
+
+            font-size: 14px;
+
+            font-weight: bold;
+        }
+
+
+        .manual-form {
+
+            display: grid;
+
+            grid-template-columns:
+                minmax(0, 1fr)
+                auto;
+
+            gap: 10px;
+
+            width: 100%;
+        }
+
+
+        .manual-form input {
+
+            width: 100%;
+
+            min-width: 0;
+
+            padding:
+                13px
+                14px;
+
+            border:
+                1px solid
+                #d1d5db;
+
+            border-radius: 9px;
+
+            font-size: 15px;
+
+            outline: none;
+        }
+
+
+        .manual-form input:focus {
+
             border-color: #2563eb;
 
             box-shadow:
                 0 0 0 3px
-                rgba(37, 99, 235, 0.12);
+                rgba(37, 99, 235, .10);
         }
 
-        .input-hint {
-            margin-top: 7px;
 
-            color: #6b7280;
+        /*
+        |--------------------------------------------------------------------------
+        | BUTTON
+        |--------------------------------------------------------------------------
+        */
 
-            font-size: 12px;
-        }
-
-        /* =========================
-           BUTTON
-        ========================= */
-
-        .button {
-            width: 100%;
-
-            margin-top: 5px;
-
-            padding: 13px 16px;
+        .btn {
 
             border: none;
 
-            border-radius: 10px;
+            cursor: pointer;
+
+            padding:
+                12px
+                17px;
+
+            border-radius: 9px;
+
+            font-size: 14px;
+
+            font-weight: bold;
+
+            text-decoration: none;
+
+            display: inline-flex;
+
+            align-items: center;
+
+            justify-content: center;
+
+            gap: 6px;
+
+            white-space: nowrap;
+        }
+
+
+        .btn-primary {
 
             background: #2563eb;
 
-            color: #ffffff;
-
-            font-size: 14px;
-
-            font-weight: 700;
-
-            cursor: pointer;
-
-            transition:
-                background 0.2s ease,
-                transform 0.1s ease;
+            color: white;
         }
 
-        .button:hover {
+
+        .btn-primary:hover {
             background: #1d4ed8;
         }
 
-        .button:active {
-            transform: scale(0.98);
+
+        .btn-danger {
+
+            background: #dc2626;
+
+            color: white;
         }
 
-        .button:disabled {
-            background: #9ca3af;
 
-            cursor: not-allowed;
-
-            transform: none;
+        .btn-danger:hover {
+            background: #b91c1c;
         }
 
-        /* =========================
-           LOADING
-        ========================= */
 
-        .loading {
-            display: none;
+        .btn-success {
 
-            margin-top: 18px;
+            background: #16a34a;
 
-            padding: 12px;
-
-            background: #eff6ff;
-
-            color: #1d4ed8;
-
-            border-radius: 10px;
-
-            text-align: center;
-
-            font-size: 13px;
-
-            font-weight: 600;
+            color: white;
         }
 
-        /* =========================
-           SUCCESS
-        ========================= */
 
-        .success {
-            display: none;
-
-            margin-top: 18px;
-
-            padding: 16px;
-
-            background: #ecfdf5;
-
-            border: 1px solid #bbf7d0;
-
-            color: #166534;
-
-            border-radius: 11px;
-
-            font-size: 14px;
-
-            line-height: 1.5;
+        .btn-success:hover {
+            background: #15803d;
         }
 
-        .success-title {
-            margin-bottom: 4px;
 
-            font-weight: 700;
+        .btn-gray {
+
+            background: #e5e7eb;
+
+            color: #111827;
         }
 
-        /* =========================
-           SCAN AGAIN
-        ========================= */
 
-        .scan-again {
-            display: none;
+        .btn-gray:hover {
+            background: #d1d5db;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | SELECTED UNIT CARD
+        |--------------------------------------------------------------------------
+        */
+
+        .selected-card {
 
             width: 100%;
 
-            margin-top: 10px;
+            background: white;
 
-            padding: 12px 16px;
+            border-radius: 14px;
 
-            border: 1px solid #d1d5db;
+            padding: 22px;
 
-            border-radius: 10px;
+            box-shadow:
+                0 3px 14px
+                rgba(0, 0, 0, 0.05);
+        }
 
-            background: #ffffff;
+
+        .selected-header {
+
+            display: flex;
+
+            align-items: center;
+
+            justify-content:
+                space-between;
+
+            gap: 12px;
+
+            padding-bottom: 16px;
+
+            border-bottom:
+                1px solid
+                #e5e7eb;
+        }
+
+
+        .selected-title {
+
+            margin: 0;
+
+            font-size: 20px;
+        }
+
+
+        .count-badge {
+
+            flex-shrink: 0;
+
+            background: #e5e7eb;
 
             color: #374151;
 
-            font-size: 14px;
+            padding:
+                7px
+                11px;
 
-            font-weight: 600;
+            border-radius: 999px;
+
+            font-size: 13px;
+
+            font-weight: bold;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | CLEAR BUTTON
+        |--------------------------------------------------------------------------
+        */
+
+        .clear-row {
+
+            margin:
+                16px 0;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | UNIT LIST
+        |--------------------------------------------------------------------------
+        */
+
+        .unit-list {
+
+            display: flex;
+
+            flex-direction: column;
+
+            gap: 10px;
+
+            width: 100%;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | UNIT ITEM
+        |--------------------------------------------------------------------------
+        */
+
+        .unit-item {
+
+            width: 100%;
+
+            display: grid;
+
+            grid-template-columns:
+                28px
+                minmax(0, 1fr)
+                40px;
+
+            align-items: center;
+
+            gap: 12px;
+
+            padding:
+                15px;
+
+            border:
+                1px solid
+                #e5e7eb;
+
+            border-radius: 11px;
+
+            background: #ffffff;
+
+            min-width: 0;
+        }
+
+
+        .unit-item:hover {
+
+            border-color: #cbd5e1;
+
+            background: #f8fafc;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | CHECKBOX
+        |--------------------------------------------------------------------------
+        */
+
+        .unit-checkbox {
+
+            width: 20px;
+
+            height: 20px;
+
+            margin: 0;
 
             cursor: pointer;
         }
 
-        .scan-again:hover {
-            background: #f9fafb;
+
+        /*
+        |--------------------------------------------------------------------------
+        | UNIT INFORMATION
+        |--------------------------------------------------------------------------
+        */
+
+        .unit-info {
+
+            min-width: 0;
+
+            overflow: hidden;
         }
 
-        /* =========================
-           MOBILE
-        ========================= */
 
-        @media (max-width: 600px) {
+        .unit-code {
+
+            font-size: 17px;
+
+            font-weight: bold;
+
+            color: #111827;
+
+            margin-bottom: 4px;
+
+            word-break: break-word;
+        }
+
+
+        .unit-name {
+
+            font-size: 14px;
+
+            color: #374151;
+
+            margin-bottom: 5px;
+
+            line-height: 1.4;
+
+            overflow-wrap: anywhere;
+        }
+
+
+        .unit-meta {
+
+            display: flex;
+
+            flex-wrap: wrap;
+
+            gap: 5px 10px;
+
+            color: #6b7280;
+
+            font-size: 13px;
+
+            line-height: 1.4;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | REMOVE
+        |--------------------------------------------------------------------------
+        */
+
+        .remove-btn {
+
+            width: 36px;
+
+            height: 36px;
+
+            border: none;
+
+            border-radius: 50%;
+
+            background: #fee2e2;
+
+            color: #b91c1c;
+
+            cursor: pointer;
+
+            font-size: 19px;
+
+            font-weight: bold;
+
+            display: flex;
+
+            align-items: center;
+
+            justify-content: center;
+
+            flex-shrink: 0;
+        }
+
+
+        .remove-btn:hover {
+
+            background: #fecaca;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | RENTAL FORM
+        |--------------------------------------------------------------------------
+        */
+
+        .rental-form {
+
+            width: 100%;
+
+            margin-top: 20px;
+
+            padding-top: 20px;
+
+            border-top:
+                1px solid
+                #e5e7eb;
+        }
+
+
+        .renter-label {
+
+            display: block;
+
+            margin-bottom: 7px;
+
+            font-size: 14px;
+
+            font-weight: bold;
+        }
+
+
+        .renter-input {
+
+            width: 100%;
+
+            padding:
+                13px
+                14px;
+
+            border:
+                1px solid
+                #d1d5db;
+
+            border-radius: 9px;
+
+            font-size: 15px;
+
+            outline: none;
+
+            margin-bottom: 13px;
+        }
+
+
+        .renter-input:focus {
+
+            border-color: #2563eb;
+
+            box-shadow:
+                0 0 0 3px
+                rgba(37, 99, 235, .10);
+        }
+
+
+        .submit-rental {
+
+            width: 100%;
+
+            min-height: 48px;
+
+            border: none;
+
+            border-radius: 9px;
+
+            background: #16a34a;
+
+            color: white;
+
+            font-size: 15px;
+
+            font-weight: bold;
+
+            cursor: pointer;
+        }
+
+
+        .submit-rental:hover {
+
+            background: #15803d;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | EMPTY
+        |--------------------------------------------------------------------------
+        */
+
+        .empty {
+
+            text-align: center;
+
+            padding:
+                35px
+                15px;
+
+            color: #6b7280;
+
+            font-size: 14px;
+
+            line-height: 1.6;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | RESPONSIVE TABLET
+        |--------------------------------------------------------------------------
+        */
+
+        @media (max-width: 700px) {
 
             .container {
-                width: 94%;
 
-                padding-top: 22px;
+                padding:
+                    18px
+                    12px
+                    40px;
             }
 
-            .header h1 {
-                font-size: 26px;
+
+            .topbar {
+
+                align-items:
+                    flex-start;
+
+                flex-direction:
+                    column;
             }
 
+
+            .back-btn {
+
+                width: 100%;
+            }
+
+
+            .page-title h1 {
+
+                font-size: 23px;
+            }
+
+
+            .card,
+            .scanner-card,
+            .selected-card {
+
+                padding: 17px;
+
+                border-radius: 12px;
+            }
+
+
+            .manual-form {
+
+                grid-template-columns: 1fr;
+            }
+
+
+            .manual-form button {
+
+                width: 100%;
+            }
+
+
+            .selected-header {
+
+                align-items:
+                    flex-start;
+            }
+
+
+            .selected-title {
+
+                font-size: 18px;
+            }
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | RESPONSIVE HP
+        |--------------------------------------------------------------------------
+        */
+
+        @media (max-width: 480px) {
+
+            .container {
+
+                padding:
+                    14px
+                    10px
+                    30px;
+            }
+
+
+            .page-title h1 {
+
+                font-size: 21px;
+            }
+
+
+            .page-title p {
+
+                font-size: 13px;
+            }
+
+
+            .branch-name {
+
+                font-size: 18px;
+            }
+
+
+            .scanner-card,
+            .selected-card,
             .card {
-                padding: 18px;
 
-                border-radius: 15px;
+                padding: 14px;
             }
 
-            .section-header {
-                align-items: flex-start;
 
-                flex-direction: column;
+            .unit-item {
+
+                grid-template-columns:
+                    25px
+                    minmax(0, 1fr)
+                    36px;
+
+                gap: 9px;
+
+                padding: 12px;
             }
 
-            .scanner-wrapper {
-                padding: 8px;
+
+            .unit-code {
+
+                font-size: 16px;
             }
 
-            .unit-body {
-                padding-left: 17px;
 
-                padding-right: 17px;
+            .unit-name {
+
+                font-size: 13px;
             }
 
-            .form-area {
-                margin-top: 20px;
 
-                padding-top: 20px;
+            .unit-meta {
+
+                font-size: 12px;
             }
 
+
+            .remove-btn {
+
+                width: 32px;
+
+                height: 32px;
+
+                font-size: 17px;
+            }
+
+
+            .count-badge {
+
+                font-size: 12px;
+
+                padding:
+                    6px
+                    9px;
+            }
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | VERY SMALL PHONE
+        |--------------------------------------------------------------------------
+        */
+
+        @media (max-width: 360px) {
+
+            .unit-item {
+
+                grid-template-columns:
+                    23px
+                    minmax(0, 1fr)
+                    32px;
+
+                gap: 7px;
+
+                padding: 10px;
+            }
+
+
+            .unit-code {
+
+                font-size: 15px;
+            }
+
+
+            .unit-meta {
+
+                display: block;
+            }
         }
 
     </style>
 
 </head>
 
+
 <body>
 
 <div class="container">
 
-    <a
-        href="dashboard.php"
-        class="back"
-    >
-        ← Kembali ke Dashboard
-    </a>
+
+    <!-- ==========================================================
+         HEADER
+    =========================================================== -->
+
+    <div class="topbar">
+
+        <div class="page-title">
+
+            <h1>
+                📷 Scan Unit Keluar
+            </h1>
+
+            <p>
+                Pilih satu atau beberapa unit untuk disewakan.
+            </p>
+
+        </div>
 
 
-    <div class="header">
-
-        <h1>
-            Scan Unit Keluar
-        </h1>
-
-        <p>
-            Scan QR Code unit yang akan disewakan,
-            kemudian masukkan kode penyewa.
-        </p>
+        <a
+            href="dashboard.php"
+            class="back-btn"
+        >
+            ← Kembali ke Dashboard
+        </a>
 
     </div>
 
+
+    <!-- ==========================================================
+         CABANG
+    =========================================================== -->
 
     <div class="card">
 
-        <!-- =========================
-             SCANNER
-        ========================== -->
+        <div class="branch-name">
 
-        <div class="section-header">
-
-            <h2>
-                Scan QR Unit
-            </h2>
-
-            <div class="scanner-status">
-
-                <span class="status-dot"></span>
-
-                Scanner aktif
-
-            </div>
+            Cabang:
+            <?= htmlspecialchars(
+                user_branch_name()
+            ) ?>
 
         </div>
 
 
-        <div class="scanner-wrapper">
+        <div class="branch-description">
 
-            <div id="reader"></div>
+            Hanya unit milik cabang ini dan berstatus
+            <strong>TERSEDIA</strong>
+            yang dapat disewakan.
+
+        </div>
+
+    </div>
+
+
+    <!-- ==========================================================
+         MESSAGE
+    =========================================================== -->
+
+    <?php if ($success !== ''): ?>
+
+        <div class="message success">
+
+            <?= htmlspecialchars($success) ?>
+
+        </div>
+
+    <?php endif; ?>
+
+
+    <?php if ($error !== ''): ?>
+
+        <div class="message error">
+
+            <?= htmlspecialchars($error) ?>
+
+        </div>
+
+    <?php endif; ?>
+
+
+    <!-- ==========================================================
+         SCANNER
+    =========================================================== -->
+
+    <div class="scanner-card">
+
+        <h2>
+            📷 Scan QR Unit
+        </h2>
+
+
+        <p class="scanner-description">
+
+            Arahkan kamera ke QR unit.
+            QR berisi kode unit seperti
+            <strong>A1</strong>,
+            <strong>A2</strong>,
+            dan seterusnya.
+
+        </p>
+
+
+        <div id="reader"></div>
+
+
+        <div class="manual-title">
+
+            Atau masukkan kode unit secara manual
 
         </div>
 
 
-        <div class="scanner-hint">
-
-            Arahkan kamera ke QR Code unit
-            sampai berhasil terbaca.
-
-        </div>
-
-
-        <!-- =========================
-             ERROR
-        ========================== -->
-
-        <div
-            id="error"
-            class="error"
-        ></div>
-
-
-        <!-- =========================
-             UNIT INFO
-        ========================== -->
-
-        <div
-            id="unitInfo"
-            class="unit-info"
+        <form
+            method="POST"
+            action="scan-keluar.php"
+            class="manual-form"
+            id="manualScanForm"
         >
 
-            <div class="unit-header">
-
-                <h2>
-                    Informasi Unit
-                </h2>
-
-                <p>
-                    Periksa unit sebelum dikonfirmasi
-                    sebagai unit keluar.
-                </p>
-
-            </div>
+            <input
+                type="text"
+                name="kode_unit"
+                id="kode_unit"
+                placeholder="Contoh: A1"
+                autocomplete="off"
+                required
+            >
 
 
-            <div class="unit-body">
-
-                <div class="row">
-
-                    <div class="label">
-                        Kode Unit
-                    </div>
-
-                    <div
-                        class="value"
-                        id="kodeUnit"
-                    ></div>
-
-                </div>
+            <input
+                type="hidden"
+                name="action"
+                value="scan"
+            >
 
 
-                <div class="row">
-
-                    <div class="label">
-                        Nama Unit
-                    </div>
-
-                    <div
-                        class="value"
-                        id="namaUnit"
-                    ></div>
-
-                </div>
-
-
-                <div class="row">
-
-                    <div class="label">
-                        Kategori
-                    </div>
-
-                    <div
-                        class="value"
-                        id="kategori"
-                    ></div>
-
-                </div>
-
-
-                <div class="row">
-
-                    <div class="label">
-                        Cabang
-                    </div>
-
-                    <div
-                        class="value"
-                        id="cabang"
-                    ></div>
-
-                </div>
-
-
-                <div class="row">
-
-                    <div class="label">
-                        Status Unit
-                    </div>
-
-                    <div class="value">
-
-                        <span
-                            id="status"
-                            class="unit-status"
-                        ></span>
-
-                    </div>
-
-                </div>
-
-            </div>
-
-        </div>
-
-
-        <!-- =========================
-             KODE PENYEWA
-        ========================== -->
-
-        <div
-            id="formArea"
-            class="form-area"
-        >
-
-            <div class="form-title">
-                Kode Penyewa
-            </div>
-
-            <p class="form-description">
-                Masukkan kode penyewa sebelum
-                mengonfirmasi unit keluar.
-            </p>
-
-
-            <div class="form-group">
-
-                <label for="renterCode">
-                    Kode Penyewa
-                </label>
-
-                <div class="input-wrapper">
-
-                    <input
-                        type="text"
-                        id="renterCode"
-                        maxlength="4"
-                        minlength="4"
-                        inputmode="numeric"
-                        pattern="[0-9]{4}"
-                        placeholder="0000"
-                        autocomplete="off"
-                    >
-
-                </div>
-
-                <div class="input-hint">
-                    Kode harus terdiri dari tepat 4 angka.
-                </div>
-
-            </div>
+            <input
+                type="hidden"
+                name="csrf_token"
+                value="<?= htmlspecialchars(
+                    csrf_token()
+                ) ?>"
+            >
 
 
             <button
-                type="button"
-                id="submitButton"
-                class="button"
-                onclick="prosesUnitKeluar()"
+                type="submit"
+                class="btn btn-primary"
             >
-                Konfirmasi Unit Keluar
+                + Tambah Unit
             </button>
 
-        </div>
-
-
-        <!-- =========================
-             LOADING
-        ========================== -->
-
-        <div
-            id="loading"
-            class="loading"
-        >
-            Sedang memproses unit...
-        </div>
-
-
-        <!-- =========================
-             SUCCESS
-        ========================== -->
-
-        <div
-            id="success"
-            class="success"
-        ></div>
-
-
-        <!-- =========================
-             SCAN AGAIN
-        ========================== -->
-
-        <button
-            type="button"
-            id="scanAgainButton"
-            class="scan-again"
-            onclick="scanAgain()"
-        >
-            Scan Unit Berikutnya
-        </button>
+        </form>
 
     </div>
+
+
+    <!-- ==========================================================
+         UNIT YANG DIPILIH
+    =========================================================== -->
+
+    <div class="selected-card">
+
+
+        <div class="selected-header">
+
+            <h2 class="selected-title">
+                Unit yang Dipilih
+            </h2>
+
+
+            <span class="count-badge">
+
+                <?= count($scannedUnits) ?>
+                unit
+
+            </span>
+
+        </div>
+
+
+        <?php if (
+            count($scannedUnits) === 0
+        ): ?>
+
+            <div class="empty">
+
+                Belum ada unit yang dipilih.
+
+                <br>
+
+                Silakan scan QR atau masukkan
+                kode unit secara manual.
+
+            </div>
+
+
+        <?php else: ?>
+
+
+            <!-- ==================================================
+                 CLEAR
+            =================================================== -->
+
+            <div class="clear-row">
+
+                <form
+                    method="POST"
+                    action="scan-keluar.php"
+                    onsubmit="
+                        return confirm(
+                            'Kosongkan semua unit yang sudah dipilih?'
+                        );
+                    "
+                >
+
+                    <input
+                        type="hidden"
+                        name="action"
+                        value="clear"
+                    >
+
+
+                    <input
+                        type="hidden"
+                        name="csrf_token"
+                        value="<?= htmlspecialchars(
+                            csrf_token()
+                        ) ?>"
+                    >
+
+
+                    <button
+                        type="submit"
+                        class="btn btn-danger"
+                    >
+                        🗑 Kosongkan Semua
+                    </button>
+
+                </form>
+
+            </div>
+
+
+            <!-- ==================================================
+                 RENTAL FORM
+            =================================================== -->
+
+            <form
+                method="POST"
+                action="proses-keluar.php"
+                class="rental-form"
+                id="rentalForm"
+            >
+
+
+                <div class="unit-list">
+
+
+                    <?php foreach (
+                        $scannedUnits
+                        as $unit
+                    ): ?>
+
+
+                        <div class="unit-item">
+
+
+                            <!-- CHECK -->
+
+                            <input
+                                type="checkbox"
+                                name="unit_ids[]"
+                                value="<?= (int)$unit['id'] ?>"
+                                class="unit-checkbox"
+                                checked
+                            >
+
+
+                            <!-- INFO -->
+
+                            <div class="unit-info">
+
+                                <div class="unit-code">
+
+                                    <?= htmlspecialchars(
+                                        $unit['kode_unit']
+                                    ) ?>
+
+                                </div>
+
+
+                                <div class="unit-name">
+
+                                    <?= htmlspecialchars(
+                                        $unit['nama_unit']
+                                    ) ?>
+
+                                </div>
+
+
+                                <div class="unit-meta">
+
+                                    <span>
+
+                                        Kategori:
+                                        <?= htmlspecialchars(
+                                            $unit['kategori']
+                                        ) ?>
+
+                                    </span>
+
+
+                                    <span>
+
+                                        Jumlah:
+                                        <?= (int)$unit['jumlah'] ?>
+
+                                    </span>
+
+                                </div>
+
+                            </div>
+
+
+                            <!-- REMOVE -->
+
+                            <button
+                                type="button"
+                                class="remove-btn"
+                                title="Hapus unit"
+                                onclick="
+                                    removeScannedUnit(
+                                        <?= (int)$unit['id'] ?>
+                                    )
+                                "
+                            >
+                                ×
+                            </button>
+
+
+                        </div>
+
+
+                    <?php endforeach; ?>
+
+
+                </div>
+
+
+                <!-- ==================================================
+                     RENTER
+                =================================================== -->
+
+                <div class="rental-form">
+
+
+                    <label
+                        for="renter_code"
+                        class="renter-label"
+                    >
+                        Kode Penyewa
+                    </label>
+
+
+                    <input
+                        type="text"
+                        name="renter_code"
+                        id="renter_code"
+                        class="renter-input"
+                        placeholder="Masukkan kode penyewa"
+                        autocomplete="off"
+                        required
+                    >
+
+
+                    <input
+                        type="hidden"
+                        name="csrf_token"
+                        value="<?= htmlspecialchars(
+                            csrf_token()
+                        ) ?>"
+                    >
+
+
+                    <button
+                        type="submit"
+                        class="submit-rental"
+                        onclick="return validateRental();"
+                    >
+                        🚚 Sewakan Unit yang Dipilih
+                    </button>
+
+                </div>
+
+
+            </form>
+
+
+        <?php endif; ?>
+
+
+    </div>
+
 
 </div>
 
@@ -931,670 +1742,399 @@ require_once "../config/csrf.php";
 
 /*
 |--------------------------------------------------------------------------
-| VARIABEL
+| SCAN QR
 |--------------------------------------------------------------------------
 */
 
-let scanner = null;
+let scanProcessing = false;
 
-let qrToken = "";
 
-let scannerStopped = false;
+function onScanSuccess(
+    decodedText,
+    decodedResult
+) {
+
+    if (scanProcessing) {
+        return;
+    }
+
+
+    scanProcessing = true;
+
+
+    const kodeInput =
+        document.getElementById(
+            'kode_unit'
+        );
+
+
+    const manualForm =
+        document.getElementById(
+            'manualScanForm'
+        );
+
+
+    if (!kodeInput || !manualForm) {
+        return;
+    }
+
+
+    kodeInput.value =
+        decodedText.trim();
+
+
+    manualForm.submit();
+}
 
 
 /*
 |--------------------------------------------------------------------------
-| CSRF TOKEN
+| QR SCANNER
 |--------------------------------------------------------------------------
 */
 
-const csrfToken =
-    "<?= htmlspecialchars(
-        csrf_token(),
-        ENT_QUOTES,
-        "UTF-8"
-    ) ?>";
+document.addEventListener(
+    'DOMContentLoaded',
+    function () {
+
+        const readerElement =
+            document.getElementById(
+                'reader'
+            );
 
 
-/*
-|--------------------------------------------------------------------------
-| MULAI SCANNER
-|--------------------------------------------------------------------------
-*/
-
-function mulaiScanner() {
-
-    scannerStopped = false;
-
-    scanner = new Html5Qrcode("reader");
+        if (!readerElement) {
+            return;
+        }
 
 
-    scanner.start(
+        try {
 
-        {
-            facingMode: "environment"
-        },
-
-        {
-            fps: 10,
-
-            qrbox: {
-                width: 250,
-                height: 250
-            }
-        },
+            const html5QrCode =
+                new Html5Qrcode(
+                    "reader"
+                );
 
 
-        function (qrCodeMessage) {
+            Html5Qrcode
+                .getCameras()
 
-            /*
-             * Hindari scan berkali-kali
-             */
+                .then(function (devices) {
 
-            if (scannerStopped) {
-                return;
-            }
+                    if (
+                        !devices ||
+                        devices.length === 0
+                    ) {
 
-            scannerStopped = true;
+                        readerElement.innerHTML =
+                            '<div style="' +
+                            'padding:15px;' +
+                            'text-align:center;' +
+                            'color:#b91c1c;' +
+                            'background:#fee2e2;' +
+                            'border-radius:10px;' +
+                            '">' +
+                            'Kamera tidak ditemukan. ' +
+                            'Gunakan input kode unit manual.' +
+                            '</div>';
+
+                        return;
+                    }
 
 
-            scanner
-                .stop()
+                    let cameraId =
+                        devices[0].id;
 
-                .then(function () {
 
-                    cekUnit(qrCodeMessage);
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Prioritaskan kamera belakang
+                    |--------------------------------------------------------------------------
+                    */
+
+                    if (
+                        devices.length > 1
+                    ) {
+
+                        const backCamera =
+                            devices.find(
+                                function (device) {
+
+                                    const label =
+                                        (
+                                            device.label
+                                            || ''
+                                        ).toLowerCase();
+
+
+                                    return (
+                                        label.includes(
+                                            'back'
+                                        ) ||
+
+                                        label.includes(
+                                            'rear'
+                                        ) ||
+
+                                        label.includes(
+                                            'environment'
+                                        )
+                                    );
+                                }
+                            );
+
+
+                        if (backCamera) {
+
+                            cameraId =
+                                backCamera.id;
+                        }
+                    }
+
+
+                    html5QrCode.start(
+
+                        cameraId,
+
+                        {
+
+                            fps: 10,
+
+                            qrbox: {
+                                width: 250,
+                                height: 250
+                            }
+
+                        },
+
+                        onScanSuccess,
+
+                        function () {
+
+                            // Error scan tidak ditampilkan.
+                        }
+
+                    )
+
+                    .catch(
+                        function () {
+
+                            readerElement.innerHTML =
+                                '<div style="' +
+                                'padding:15px;' +
+                                'text-align:center;' +
+                                'color:#b91c1c;' +
+                                'background:#fee2e2;' +
+                                'border-radius:10px;' +
+                                '">' +
+                                'Kamera tidak dapat digunakan. ' +
+                                'Pastikan izin kamera diberikan, ' +
+                                'atau gunakan input kode unit manual.' +
+                                '</div>';
+                        }
+                    );
 
                 })
 
-                .catch(function (error) {
+                .catch(
+                    function () {
 
-                    console.error(
-                        "Scanner stop error:",
-                        error
-                    );
+                        readerElement.innerHTML =
+                            '<div style="' +
+                            'padding:15px;' +
+                            'text-align:center;' +
+                            'color:#b91c1c;' +
+                            'background:#fee2e2;' +
+                            'border-radius:10px;' +
+                            '">' +
+                            'Tidak dapat mengakses kamera. ' +
+                            'Gunakan input kode unit manual.' +
+                            '</div>';
+                    }
+                );
 
-                    cekUnit(qrCodeMessage);
 
-                });
+        } catch (error) {
 
-        },
-
-
-        function (errorMessage) {
-
-            /*
-             * Error scanning biasa
-             * tidak perlu ditampilkan.
-             */
-
+            readerElement.innerHTML =
+                '<div style="' +
+                'padding:15px;' +
+                'text-align:center;' +
+                'color:#b91c1c;' +
+                'background:#fee2e2;' +
+                'border-radius:10px;' +
+                '">' +
+                'Scanner QR gagal dimuat. ' +
+                'Gunakan input kode unit manual.' +
+                '</div>';
         }
 
-    )
+    }
+);
 
-    .catch(function (error) {
 
-        console.error(
-            "Camera error:",
-            error
+/*
+|--------------------------------------------------------------------------
+| HAPUS UNIT
+|--------------------------------------------------------------------------
+*/
+
+function removeScannedUnit(
+    unitId
+) {
+
+    if (
+        !confirm(
+            'Hapus unit ini dari daftar scan?'
+        )
+    ) {
+
+        return;
+    }
+
+
+    const form =
+        document.createElement(
+            'form'
         );
 
-        tampilError(
-            "Kamera tidak dapat digunakan. " +
-            "Pastikan izin kamera sudah diberikan " +
-            "pada browser."
+
+    form.method = 'POST';
+
+    form.action =
+        'scan-keluar.php';
+
+
+    const actionInput =
+        document.createElement(
+            'input'
         );
 
-    });
+    actionInput.type = 'hidden';
 
+    actionInput.name =
+        'action';
+
+    actionInput.value =
+        'remove';
+
+
+    const unitInput =
+        document.createElement(
+            'input'
+        );
+
+    unitInput.type = 'hidden';
+
+    unitInput.name =
+        'unit_id';
+
+    unitInput.value =
+        unitId;
+
+
+    const csrfInput =
+        document.createElement(
+            'input'
+        );
+
+    csrfInput.type = 'hidden';
+
+    csrfInput.name =
+        'csrf_token';
+
+    csrfInput.value =
+        '<?= htmlspecialchars(
+            csrf_token()
+        ) ?>';
+
+
+    form.appendChild(
+        actionInput
+    );
+
+    form.appendChild(
+        unitInput
+    );
+
+    form.appendChild(
+        csrfInput
+    );
+
+
+    document.body.appendChild(
+        form
+    );
+
+
+    form.submit();
 }
 
 
 /*
 |--------------------------------------------------------------------------
-| CEK UNIT
+| VALIDASI TRANSAKSI
 |--------------------------------------------------------------------------
 */
 
-function cekUnit(token) {
+function validateRental() {
 
-    qrToken = token;
-
-
-    fetch(
-
-        "cek-keluar.php?qr_token=" +
-        encodeURIComponent(token),
-
-        {
-            method: "GET",
-
-            credentials: "same-origin"
-        }
-
-    )
-
-    .then(function (response) {
-
-        if (!response.ok) {
-
-            throw new Error(
-                "HTTP " +
-                response.status
-            );
-
-        }
-
-        return response.json();
-
-    })
-
-    .then(function (data) {
-
-        /*
-         * Tampilkan data unit jika tersedia
-         */
-
-        if (data.unit) {
-
-            document.getElementById(
-                "unitInfo"
-            ).style.display = "block";
-
-
-            document.getElementById(
-                "kodeUnit"
-            ).textContent =
-                data.unit.kode_unit ?? "-";
-
-
-            document.getElementById(
-                "namaUnit"
-            ).textContent =
-                data.unit.nama_unit ?? "-";
-
-
-            document.getElementById(
-                "kategori"
-            ).textContent =
-                data.unit.kategori ?? "-";
-
-
-            document.getElementById(
-                "cabang"
-            ).textContent =
-                data.unit.nama_cabang ?? "-";
-
-
-            const status =
-                document.getElementById(
-                    "status"
-                );
-
-
-            status.textContent =
-                data.unit.status ?? "-";
-
-
-            status.className =
-                "unit-status";
-
-
-            if (
-                data.unit.status ===
-                "TERSEDIA"
-            ) {
-
-                status.classList.add(
-                    "tersedia"
-                );
-
-            }
-            else if (
-                data.unit.status ===
-                "DISEWAKAN"
-            ) {
-
-                status.classList.add(
-                    "disewakan"
-                );
-
-            }
-
-        }
-
-
-        /*
-         * Jika backend menolak checkout
-         */
-
-        if (!data.success) {
-
-            tampilError(
-                data.message ||
-                "Unit tidak dapat diproses."
-            );
-
-            return;
-
-        }
-
-
-        /*
-         * Pastikan backend mengizinkan
-         */
-
-        if (!data.can_checkout) {
-
-            tampilError(
-                data.message ||
-                "Unit tidak dapat dikeluarkan."
-            );
-
-            return;
-
-        }
-
-
-        /*
-         * Tampilkan form kode penyewa
-         */
-
-        document.getElementById(
-            "formArea"
-        ).style.display = "block";
-
-
-        document.getElementById(
-            "renterCode"
-        ).focus();
-
-    })
-
-    .catch(function (error) {
-
-        console.error(
-            "Cek unit error:",
-            error
+    const checkedUnits =
+        document.querySelectorAll(
+            '#rentalForm input[name="unit_ids[]"]:checked'
         );
 
-        tampilError(
-            "Terjadi kesalahan saat mengecek unit."
+
+    if (
+        checkedUnits.length === 0
+    ) {
+
+        alert(
+            'Pilih minimal satu unit untuk disewakan.'
         );
 
-    });
+        return false;
+    }
 
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| PROSES UNIT KELUAR
-|--------------------------------------------------------------------------
-*/
-
-function prosesUnitKeluar() {
 
     const renterCode =
         document
-            .getElementById("renterCode")
+            .getElementById(
+                'renter_code'
+            )
             .value
             .trim();
 
 
-    /*
-     * Validasi kode penyewa
-     */
+    if (
+        renterCode === ''
+    ) {
 
-    if (!/^[0-9]{4}$/.test(renterCode)) {
-
-        tampilError(
-            "Kode penyewa harus terdiri dari 4 angka."
+        alert(
+            'Kode penyewa wajib diisi.'
         );
+
 
         document
-            .getElementById("renterCode")
+            .getElementById(
+                'renter_code'
+            )
             .focus();
 
-        return;
 
+        return false;
     }
 
 
-    /*
-     * Ambil tombol
-     */
-
-    const submitButton =
-        document.getElementById(
-            "submitButton"
-        );
-
-
-    /*
-     * Cegah double submit
-     */
-
-    submitButton.disabled = true;
-
-
-    /*
-     * Tampilkan loading
-     */
-
-    document.getElementById(
-        "loading"
-    ).style.display = "block";
-
-
-    /*
-     * Hilangkan error lama
-     */
-
-    tampilError("");
-
-
-    /*
-     * FormData
-     */
-
-    const formData =
-        new FormData();
-
-
-    /*
-     * CSRF
-     */
-
-    formData.append(
-        "csrf_token",
-        csrfToken
+    return confirm(
+        'Sewakan ' +
+        checkedUnits.length +
+        ' unit yang dipilih?'
     );
-
-
-    /*
-     * QR Token
-     */
-
-    formData.append(
-        "qr_token",
-        qrToken
-    );
-
-
-    /*
-     * Kode Penyewa
-     */
-
-    formData.append(
-        "renter_code",
-        renterCode
-    );
-
-
-    /*
-     * Kirim ke backend
-     */
-
-    fetch(
-
-        "proses-keluar.php",
-
-        {
-            method: "POST",
-
-            body: formData,
-
-            credentials: "same-origin"
-        }
-
-    )
-
-    .then(function (response) {
-
-        if (!response.ok) {
-
-            throw new Error(
-                "HTTP " +
-                response.status
-            );
-
-        }
-
-        return response.json();
-
-    })
-
-    .then(function (data) {
-
-        /*
-         * Hilangkan loading
-         */
-
-        document.getElementById(
-            "loading"
-        ).style.display = "none";
-
-
-        /*
-         * Berhasil
-         */
-
-        if (data.success) {
-
-            document.getElementById(
-                "formArea"
-            ).style.display = "none";
-
-
-            const success =
-                document.getElementById(
-                    "success"
-                );
-
-
-            success.style.display = "block";
-
-
-            success.textContent =
-                data.message ||
-                "Unit berhasil dikeluarkan.";
-
-
-            /*
-             * Update status visual
-             */
-
-            const status =
-                document.getElementById(
-                    "status"
-                );
-
-
-            status.textContent =
-                "DISEWAKAN";
-
-
-            status.className =
-                "unit-status disewakan";
-
-
-            /*
-             * Tampilkan tombol scan lagi
-             */
-
-            document.getElementById(
-                "scanAgainButton"
-            ).style.display = "block";
-
-
-            return;
-
-        }
-
-
-        /*
-         * Jika gagal
-         */
-
-        submitButton.disabled = false;
-
-
-        tampilError(
-            data.message ||
-            "Unit gagal diproses."
-        );
-
-    })
-
-    .catch(function (error) {
-
-        console.error(
-            "Proses unit error:",
-            error
-        );
-
-
-        document.getElementById(
-            "loading"
-        ).style.display = "none";
-
-
-        submitButton.disabled = false;
-
-
-        tampilError(
-            "Terjadi kesalahan saat memproses unit."
-        );
-
-    });
-
 }
-
-
-/*
-|--------------------------------------------------------------------------
-| TAMPILKAN ERROR
-|--------------------------------------------------------------------------
-*/
-
-function tampilError(message) {
-
-    const error =
-        document.getElementById(
-            "error"
-        );
-
-
-    if (!message) {
-
-        error.textContent = "";
-
-        error.style.display = "none";
-
-        return;
-
-    }
-
-
-    error.textContent = message;
-
-    error.style.display = "block";
-
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| SCAN LAGI
-|--------------------------------------------------------------------------
-*/
-
-function scanAgain() {
-
-    /*
-     * Sembunyikan hasil
-     */
-
-    document.getElementById(
-        "unitInfo"
-    ).style.display = "none";
-
-
-    document.getElementById(
-        "formArea"
-    ).style.display = "none";
-
-
-    document.getElementById(
-        "success"
-    ).style.display = "none";
-
-
-    document.getElementById(
-        "scanAgainButton"
-    ).style.display = "none";
-
-
-    /*
-     * Reset error
-     */
-
-    tampilError("");
-
-
-    /*
-     * Reset input
-     */
-
-    document.getElementById(
-        "renterCode"
-    ).value = "";
-
-
-    /*
-     * Reset tombol
-     */
-
-    document.getElementById(
-        "submitButton"
-    ).disabled = false;
-
-
-    /*
-     * Reset scanner state
-     */
-
-    scannerStopped = false;
-
-
-    /*
-     * Bersihkan reader lama
-     */
-
-    document.getElementById(
-        "reader"
-    ).innerHTML = "";
-
-
-    /*
-     * Mulai scanner baru
-     */
-
-    mulaiScanner();
-
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| START
-|--------------------------------------------------------------------------
-*/
-
-mulaiScanner();
 
 </script>
+
 
 </body>
 
